@@ -766,6 +766,7 @@ void setup() {
 }
 
 uint32_t lastTap = 0;
+uint32_t msgChimeAt = 0;  // 云端消息的提示音什么时候响（0 = 不响）
 bool pendingTap = false;
 uint32_t pendingTapAt = 0;
 int lastBright = -1;
@@ -1420,7 +1421,14 @@ void loop() {
     lastInteract = now;
     if (expr == SLEEP && autoNight) setExpr(CALM);
     sayText(netSayBuf, netSayHold);
+    if (netSayChime) msgChimeAt = max((uint32_t)1, now + 500);  // 等半秒：后面跟着语音的话就不响
+    netSayChime = false;
     netSayReady = false;
+  }
+  // 新消息提示音：轻轻的"叮——"往上走（和计时、专注、闹钟、微信的声音都不一样），夜里更小声
+  if (msgChimeAt && (int32_t)(now - msgChimeAt) >= 0) {
+    msgChimeAt = 0;
+    if (!audioSpeaking && !netClipIncoming && !alarmRinging) playChime(1318, 1760, 0.5f, isNight() ? 0.2f : 0.35f);
   }
   stepSubtitle(now);
   stepListen(now);

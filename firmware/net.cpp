@@ -12,6 +12,9 @@ volatile bool netOnline = false;
 char netSayBuf[640];
 volatile bool netSayReady = false;
 volatile bool netSayHold = false;
+volatile bool netSayChime = false;
+volatile bool netClipIncoming = false;
+static bool fromBridge = false;  // 当前这条消息来自 Mac 对话桥
 volatile int netBatPercent = -1;
 volatile bool netBatCharging = false, netBatUsb = false;
 volatile bool netBridgeOnline = false;
@@ -210,10 +213,12 @@ static void onWs(WStype_t type, uint8_t *payload, size_t len) {
         clipLen = strtoul((const char *)payload + 1, nullptr, 10);
         clipPos = 0;
         clipBuf = clipLen && clipLen < 4 * 1024 * 1024 ? (int16_t *)ps_malloc(clipLen) : nullptr;
+        netClipIncoming = clipBuf != nullptr;
         if (!clipBuf) logf("clip alloc failed (%u)\n", (unsigned)clipLen);
         break;
       }
       if (len == 1 && payload[0] == 'E') {
+        netClipIncoming = false;
         if (clipBuf && clipPos > 0) {
           audioPlay(clipBuf, clipPos);  // 交给播放任务，它播完会 free
           clipBuf = nullptr;
@@ -227,6 +232,7 @@ static void onWs(WStype_t type, uint8_t *payload, size_t len) {
         memcpy(netSayBuf, payload + 1, n);
         netSayBuf[n] = 0;
         netSayHold = payload[0] == 'H';
+        netSayChime = !fromBridge;  // 当面说话时的回复不用提示
         netSayReady = true;
       }
       break;
@@ -254,7 +260,9 @@ static void onBridge(WStype_t type, uint8_t *payload, size_t len) {
       break;
     case WStype_TEXT:
     case WStype_BIN:
+      fromBridge = true;
       onWs(type, payload, len);
+      fromBridge = false;
       break;
     default:
       break;

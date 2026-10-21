@@ -8,6 +8,8 @@ extern volatile int64_t netLocalEpoch;   // 对时那一刻的本地时间（按
 extern volatile bool netOnline;          // 和云端中转连着
 extern char netSayBuf[640];              // 云端发来的一句话（UTF-8）
 extern volatile bool netSayReady;
+extern volatile bool netSayChime;       // 这句是云端发来的消息（不是当面对话的回复）：响一声提示
+extern volatile bool netClipIncoming;    // 正在收一段语音（收完会播，不用再提示）
 extern volatile bool netSayHold;        // 这句要挂着（点一下或 10 分钟才收）
 extern volatile int netBatPercent;      // 主循环填，网络任务每分钟报给云端
 extern volatile bool netBatCharging, netBatUsb;
