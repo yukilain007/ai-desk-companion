@@ -1,0 +1,31 @@
+name = "desk-companion"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# 挂在自己的域名上（国内 workers.dev 常常连不上）。没有自己的域名就先删掉这一行，用 workers.dev 的地址
+routes = [{ pattern = "face.example.com", custom_domain = true }]
+
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "FaceRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FaceRoom"]
+
+# 每 30 分钟一次，到了 08:30 / 12:00 / 15:30 / 18:30（本地时间）就在屏幕上问候一句
+[triggers]
+crons = ["*/30 * * * *"]
+
+[vars]
+TZ_OFFSET_HOURS = "8"     # 时区：相对 UTC 的小时数
+GREETINGS = "on"          # 定时问候，不要就改成 "off"
+# 早安播天气：第一个是你在的地方，family = true 的是家人在的地方。不要就留 "[]"
+WEATHER_PLACES = '[{"name":"上海","lat":31.23,"lon":121.47},{"name":"成都","lat":30.57,"lon":104.07,"family":true}]'
+VOICE_ID = ""             # ElevenLabs 的声音 ID（用 speak_on_display 才需要）
+VOICE_SPEED = "1.0"       # 语速 0.7～1.2
+
+# 密钥用 wrangler secret put 设置，不写在这里：
+#   MCP_TOKEN           连接器网址里的那串（随机生成）
+#   BOARD_TOKEN         板子用的（随机生成，和 firmware/config.h、bridge/config.env 里一样）
+#   ELEVENLABS_API_KEY  可选，开口说话才需要

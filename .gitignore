@@ -1,0 +1,18 @@
+# 私人内容：密码、密钥、声音、人设
+firmware/config.h
+firmware/wake_voice.h
+bridge/config.env
+bridge/persona/CLAUDE.md
+bridge/models/
+bridge/voiceprint.npz
+bridge/enroll.flag
+bridge/.mcp.json
+bridge/*.log
+cloud/node_modules/
+cloud/.wrangler/
+cloud/.dev.vars
+cloud/.secrets
+__pycache__/
+.DS_Store
+*.pcm
+lines.json
