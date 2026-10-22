@@ -152,7 +152,7 @@ static void ancsTask(void *) {
 
 // ---------- 蓝牙配 WiFi ----------
 // LightBlue 里连上板子 → "WiFi 设置"这一项：写 "名字|密码" 加网络、"del:名字" 删、"clear" 清空；读出来是已存的和当前连的。
-// 读写都要求已配对（加密）：店里别人装了 LightBlue 也改不了
+// 读写都要求已配对（加密）：在公开场合别人装了 LightBlue 也改不了
 static NimBLEUUID WIFI_SVC("B8E0A001-5C3D-4F2A-9E1B-7A2C3D4E5F60");
 static NimBLEUUID WIFI_CHR("B8E0A002-5C3D-4F2A-9E1B-7A2C3D4E5F60");
 

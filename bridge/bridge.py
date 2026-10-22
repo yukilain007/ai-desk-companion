@@ -587,7 +587,7 @@ async def on_utterance(ws, pcm, ptt=False):
             pass
     if name:
         session.update(mode=name, until=now + SESSION_SECONDS)
-    elif ptt:  # 按键说话不用叫名字：沿用刚才的模式，没有就公共模式（只出字幕，在店里最稳妥）
+    elif ptt:  # 按键说话不用叫名字：沿用刚才的模式，没有就公共模式（只出字幕，在公开场合最稳妥）
         if now > session['until']:
             session['mode'] = 'PUBLIC'
         session['until'] = now + SESSION_SECONDS

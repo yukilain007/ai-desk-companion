@@ -59,7 +59,7 @@ static const WifiCred NETS[] = WIFI_LIST;
 // ---------- WiFi 列表与选网 ----------
 // config.h 里的 + 用手机（LightBlue）/ Mac 脚本加的（存 NVS，最多 6 个）。
 // 选网：优先"上次找到 Mac 的网络"，其次信号强的；连上 2 分钟找不到 Mac 就换下一个认识的网络，
-// 都试过就停在信号最好的那个，10 分钟后再轮一遍（比如在店里：Mac 连店里的网，板子先试店里的，找不到 Mac 再试手机热点）
+// 都试过就停在信号最好的那个，10 分钟后再轮一遍（比如在公开场合：Mac 连那里的网，板子先试那里的，找不到 Mac 再试手机热点）
 struct KnownNet { String ssid, pass; bool stored; };
 static std::vector<KnownNet> nets;
 static Preferences wprefs;
