@@ -23,7 +23,7 @@ enum : uint8_t { CAT_OTHER = 0, CAT_CALL = 1, CAT_MISSED = 2, CAT_SOCIAL = 4 };
 struct Pending { uint32_t uid; uint8_t cat; };
 static QueueHandle_t pendQ;
 static volatile uint16_t connHandle = 0xFFFF;
-static NimBLEClient *client = nullptr;
+static NimBLEClient *volatile client = nullptr;
 static volatile bool needSetup = false;
 static volatile uint32_t callUid = 0xFFFFFFFF;
 
@@ -102,7 +102,10 @@ static void ancsTask(void *) {
     if (needSetup && client) {
       needSetup = false;
       vTaskDelay(pdMS_TO_TICKS(800));
-      NimBLERemoteService *svc = client->getService(ANCS_SVC);  // 访问受保护的服务时 iPhone 会弹配对
+      // 等的这 800ms 里 iPhone 可能已经断开（client 被清空）：会空指针崩溃
+      NimBLEClient *c = client;
+      if (!c || !c->isConnected()) { logf("ble: gone before setup\n"); continue; }
+      NimBLERemoteService *svc = c->getService(ANCS_SVC);  // 访问受保护的服务时 iPhone 会弹配对
       if (svc) {
         NimBLERemoteCharacteristic *ns = svc->getCharacteristic(NOTIF_SRC);
         NimBLERemoteCharacteristic *ds = svc->getCharacteristic(DATA_SRC);
