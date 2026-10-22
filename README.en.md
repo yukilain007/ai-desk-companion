@@ -184,4 +184,4 @@ Three ways:
 - **Third-party files keep their original licenses**: `firmware/es7210.*`, `es8311.*`, `audio_hal.h` are Espressif drivers; `firmware/pin_config.h` is from Waveshare's official examples (Apache 2.0, see [docs/LICENSE-waveshare-apache2.txt](docs/LICENSE-waveshare-apache2.txt))
 - Libraries used (under their own licenses): Arduino_GFX, U8g2 (Unifont CJK font), SensorLib, XPowersLib, arduinoWebSockets, NimBLE-Arduino, whisper.cpp, sherpa-onnx
 
-> Note: because of the non-commercial restriction, this project is strictly "source-available", not "open source" as defined by the OSI.
+> This project is source-available.

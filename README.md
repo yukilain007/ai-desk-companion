@@ -182,4 +182,4 @@ cd ~/desk-companion-bridge
 - **第三方文件保留原许可**：`firmware/es7210.*`、`es8311.*`、`audio_hal.h` 来自乐鑫（Espressif）的驱动；`firmware/pin_config.h` 来自 Waveshare 官方示例（Apache 2.0，见 [docs/LICENSE-waveshare-apache2.txt](docs/LICENSE-waveshare-apache2.txt)）
 - 用到的库（各自的许可）：Arduino_GFX、U8g2（Unifont 中文字体）、SensorLib、XPowersLib、arduinoWebSockets、NimBLE-Arduino、whisper.cpp、sherpa-onnx
 
-> 项目是"源码公开"，
+> 本项目为源码公开。
