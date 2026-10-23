@@ -156,7 +156,9 @@ Three ways:
 
 ## Known limitations
 
-- **Battery life**: still being measured. With WiFi and mic on and the screen always on, a small battery lasts less than a day or two; two-stage sleep has been added but real numbers aren't in yet
+- **Battery life**: measured in Oct 2026 with the small Li-ion battery that comes with the board. Unplugged at full charge, screen off and in deep sleep, it drops about 8–10% per hour and **runs out after roughly 6 hours**. The percentage reading is unreliable below about half and can drop suddenly.
+  - If you use it as an alarm clock, **keep it plugged in overnight**, otherwise it may die before morning
+  - Further savings (WiFi off at night, gyro off in deep sleep) are still being tested and will be documented once measured
 - **Voice bridge is macOS-only**; Windows / Linux need changes (mainly launchd and finding the Mac on the network)
 - **Mandarin-only speech recognition** (whisper set to Chinese); English names are caught by re-recognizing the start of each sentence in English
 - About 70 KB of free heap (Bluetooth takes a lot); keep an eye on it when adding bigger features
