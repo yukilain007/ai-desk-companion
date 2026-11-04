@@ -18,18 +18,24 @@ A palm-sized round screen with a living face. Keep it on your desk at home, take
 - Blinks and glances around; when idle for a while it winks or raises a brow
 - Tap to change expression; slide a finger across the screen to pet it and it squints and blushes
 - Cover the screen with your palm and it closes its eyes with a soft "mm"; let go and it says "found you"
-- Wakes up when picked up, gets annoyed when shaken hard, sleeps when placed face down
-- Double-tap for a 25-minute focus session: a ring of dots, one dot per minute, chimes when done
-- Plays a soft chime when a message from Claude arrives, so you don't miss it
+- Wakes up when picked up, sleeps when placed face down
+- Shake it hard: it gives you an annoyed look, then draws a fortune ("go for it", "think again", "sleep first"…), flipping like a slot machine until it stops
+- Drop it and it gasps; after landing it grumbles. Spin it one and a half turns and it gets dizzy (spiral eyes)
+- Double-tap to set up focus: 25 dots light up around the edge; lay it flat and twist it to adjust (clockwise adds, counter-clockwise subtracts, 5 minutes per step), stop for 3 s to start. One dot per minute, chimes when done
+- Squints happily when plugged in; nods along to the beat when music plays
+- Plays a soft chime when a message from Claude arrives; if you haven't looked after 5 minutes it reminds you again (at most twice)
+- Tap a long message to open a reader view and scroll through it; swipe left/right through the last 10 messages (with times, kept across power loss)
 - Timers (up to 4) and alarms (up to 3, stored on the board, survive power loss)
 - Reminds you to go to bed, and nags again if you're still up late
-- On battery: screen off (light sleep) after 20 s of inactivity, deep sleep (mic off) after 5 min
+- On battery: screen off (light sleep) after 20 s of inactivity, deep sleep (mic and gyro off) after 5 min; at night deep sleep also turns WiFi off, waking it for 90 s every 20 min to fetch messages
+- If an alarm is set for the morning but it isn't plugged in, it tells you: when you unplug it, when the battery drops below 30%, and at bedtime
 
 **When online**
 - Claude on claude.ai (web / mobile app) can use it: change expressions, show subtitles, speak, start focus, set alarms, check battery
 - Daily greetings at set times (the morning one includes the weather)
 - iPhone calls and WeChat messages show up on screen (only who it's from, never the content)
 - Set up WiFi from your phone over Bluetooth
+- Connect to the Claude desktop app on your Mac (optional): three little dots bounce while Claude is working; when a command needs approval, long-press the board to approve or tap to deny
 
 **At home / in public, with your Mac on**
 - Say its name and talk to it; it replies with expressions and subtitles (and can speak if you want)
@@ -70,7 +76,7 @@ The three parts are independent, so you can use just some of them:
    ```
 2. Install the libraries:
    ```bash
-   arduino-cli lib install "GFX Library for Arduino" U8g2 SensorLib XPowersLib WebSockets NimBLE-Arduino
+   arduino-cli lib install "GFX Library for Arduino" U8g2 SensorLib XPowersLib WebSockets NimBLE-Arduino ArduinoJson
    ```
 3. Copy `firmware/config.example.h` to `firmware/config.h` and fill in your name, WiFi, and timezone (it compiles without it, just offline)
 4. Plug the board into your Mac over USB and run:
@@ -126,12 +132,26 @@ Then:
 
 ---
 
+## 4. Claude desktop app (optional)
+
+The board implements the Claude desktop app's (macOS / Windows) [Hardware Buddy BLE protocol](https://github.com/anthropics/claude-desktop-buddy):
+1. In the Claude desktop app: **Help → Troubleshooting → Enable Developer Mode**, which adds a **Developer** menu
+2. **Developer → Open Hardware Buddy…**, click Connect, and pick the device whose name starts with `Claude`
+3. The board shows a 6-digit passkey; enter it on the computer
+4. It reconnects automatically after that. While Claude Code / Cowork is running, three dots bounce below the face; when a tool call needs approval, the board raises a brow and shows the tool and command. **Long-press for 1 s to approve, tap to deny**
+
+This is a developer-mode feature, not an officially supported product feature. The desktop app only finds devices whose Bluetooth name starts with `Claude`, so the board is named `Claude <BLE_NAME>` (change `BUDDY_NAME` in `config.h`).
+
+> Upgrading from an older version: the board switches to a new Bluetooth address, so on your iPhone forget the old device in Bluetooth settings and pair again (the passkey is shown on the board).
+
+---
+
 ## WiFi setup
 
 Three ways:
 - Put it in `firmware/config.h` (baked in when flashing)
 - Over USB: `python3 tools/add_wifi.py` (password is hidden as you type)
-- From your phone: install **LightBlue** from the App Store, connect to the board (iPhone will ask to pair), find the "WiFi设置" (WiFi settings) characteristic and write `SSID|password`
+- From your phone: install **LightBlue** from the App Store, connect to the board (iPhone will ask to pair; enter the passkey shown on the board), find the "WiFi设置" (WiFi settings) characteristic and write `SSID|password`
 
 2.4 GHz only. For an iPhone hotspot, turn on "Maximize Compatibility". It remembers up to 6 networks and picks automatically, preferring the one where it can find your Mac.
 
@@ -151,6 +171,9 @@ Three ways:
 | `L7:30\|62` / `L0` | Weekday 7:30 alarm (62 = Mon–Fri, 127 = every day, 128 = once) / cancel all |
 | `Nssid\|password` / `Nlist` / `Ndel:ssid` | Add / list / delete WiFi |
 | `B` | Pretend to be on battery (test sleep while plugged in) |
+| `D` / `Dn` | Enter deep sleep now / treat it as night (WiFi off) |
+| `O` | Draw a fortune (no shaking needed) |
+| `G?` / `G!` | Bluetooth status / restart advertising |
 
 ---
 
@@ -158,7 +181,7 @@ Three ways:
 
 - **Battery life**: measured in Oct 2026 with the small Li-ion battery that comes with the board. Unplugged at full charge, screen off and in deep sleep, it drops about 8–10% per hour and **runs out after roughly 6 hours**. The percentage reading is unreliable below about half and can drop suddenly.
   - If you use it as an alarm clock, **keep it plugged in overnight**, otherwise it may die before morning
-  - Further savings (WiFi off at night, gyro off in deep sleep) are still being tested and will be documented once measured
+  - Night-time savings (WiFi off, gyro off, slower Bluetooth connection interval in deep sleep) are now in; how much longer it lasts is still being measured
 - **Voice bridge is macOS-only**; Windows / Linux need changes (mainly launchd and finding the Mac on the network)
 - **Mandarin-only speech recognition** (whisper set to Chinese); English names are caught by re-recognizing the start of each sentence in English
 - About 70 KB of free heap (Bluetooth takes a lot); keep an eye on it when adding bigger features

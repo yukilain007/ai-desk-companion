@@ -11,6 +11,12 @@
 #ifndef BLE_NAME
 #define BLE_NAME "桌面小伙伴"
 #endif
+#ifndef BUDDY_NAME  // 蓝牙正式名字（iPhone 蓝牙列表、Claude 桌面端里显示）：必须以 Claude 开头，桌面端才找得到
+#define BUDDY_NAME "Claude " BLE_NAME
+#endif
+#ifndef BUDDY_ADV_NAME  // 广播包里的短名字：和服务 UUID 挤在 31 字节里，最多 9 个字节（一个汉字占 3 个），也要以 Claude 开头
+#define BUDDY_ADV_NAME "Claude"
+#endif
 #ifndef TZ_OFFSET_HOURS
 #define TZ_OFFSET_HOURS 8
 #endif

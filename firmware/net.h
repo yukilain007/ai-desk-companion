@@ -6,6 +6,8 @@ extern volatile int netPendingFace;      // 云端发来的表情，-1 = 没有
 extern volatile bool netTimeReady;       // NTP 对上时了
 extern volatile int64_t netLocalEpoch;   // 对时那一刻的本地时间（按 config.h 的时区）
 extern volatile bool netOnline;          // 和云端中转连着
+extern volatile bool netWifiPause;   // 主循环设：夜里深睡时关掉 WiFi（省电），醒来 / 定时开窗时再开
+extern volatile bool netSlowLoop;    // 深睡：网络任务 0.1 秒转一圈（平时 0.01 秒）
 extern char netSayBuf[640];              // 云端发来的一句话（UTF-8）
 extern volatile bool netSayReady;
 extern volatile bool netSayChime;       // 这句是云端发来的消息（不是当面对话的回复）：响一声提示

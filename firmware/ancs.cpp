@@ -1,10 +1,12 @@
 // iPhone 通知（ANCS）。参考 NimBLE-Arduino 的 ANCS 示例，改成单独的任务、不卡主循环。
-// 流程：板子广播（声明要用 ANCS）→ iPhone 在蓝牙设置里点它（BLE_NAME）配对 → 订阅通知来源和数据来源
+// 流程：板子广播（声明要用 ANCS）→ iPhone 在蓝牙设置里点它（BUDDY_NAME）配对 → 订阅通知来源和数据来源
 // → 有新通知时按类别过滤，要显示的再去问"哪个 App、标题是什么"（不问正文）→ 交给主循环。
 #include "ancs.h"
 #include "log.h"
 #include "NimBLEDevice.h"
 #include "net.h"
+#include <ArduinoJson.h>
+#include <Preferences.h>
 #include "settings.h"
 
 volatile bool ancsReady = false;
@@ -65,18 +67,45 @@ static void onNotifSource(NimBLERemoteCharacteristic *, uint8_t *d, size_t n, bo
   }
 }
 
+// ---- Claude 桌面端 Hardware Buddy ----
+volatile bool buddyConnected = false;
+volatile uint32_t buddyLastBeat = 0;
+volatile int buddyTotal = 0, buddyRunning = 0, buddyWaiting = 0;
+char buddyMsg[80] = "";
+char buddyPromptId[64] = "", buddyTool[32] = "", buddyHint[96] = "";
+volatile uint32_t buddyPromptSeq = 0;
+volatile int buddyDecision = 0;
+volatile uint32_t buddyPasskey = 0, buddyPasskeySeq = 0;
+volatile int64_t buddyTimeEpoch = 0;
+static volatile uint16_t buddyHandle = 0xFFFF;
+static NimBLECharacteristic *nusTx = nullptr;
+static QueueHandle_t lineQ;
+static int statAppr = 0, statDeny = 0;
+
 class Callbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *s, NimBLEConnInfo &ci) override {
-    connHandle = ci.getConnHandle();
-    client = s->getClient(ci);
-    needSetup = true;
-    logf("ble: iphone connected\n");
+    if (!ancsConnected) {  // 还没有 iPhone：这个连接可能是 iPhone，试试 ANCS（Mac 上没有，会失败，不影响）
+      connHandle = ci.getConnHandle();
+      client = s->getClient(ci);
+      needSetup = true;
+    }
+    logf("ble: connected (%d now)\n", s->getConnectedCount());
+    if (s->getConnectedCount() < 3) NimBLEDevice::startAdvertising();  // iPhone 和 Mac 可以同时连
   }
-  void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
-    connHandle = 0xFFFF;
-    ancsConnected = false;
-    client = nullptr;
+  void onDisconnect(NimBLEServer *, NimBLEConnInfo &ci, int reason) override {
+    if (ci.getConnHandle() == connHandle) {
+      connHandle = 0xFFFF;
+      ancsConnected = false;
+      client = nullptr;
+    }
+    if (ci.getConnHandle() == buddyHandle) { buddyHandle = 0xFFFF; buddyConnected = false; }
     logf("ble: disconnected (%d)\n", reason);
+  }
+  uint32_t onPassKeyDisplay() override {  // 配对：屏幕上显示 6 位数，在 Mac / iPhone 上输入
+    uint32_t pk = 100000 + esp_random() % 900000;
+    buddyPasskey = pk;
+    buddyPasskeySeq++;
+    return pk;
   }
   void onAuthenticationComplete(NimBLEConnInfo &ci) override {
     logf("ble: %s\n", ci.isEncrypted() ? "paired/encrypted" : "pairing failed");
@@ -96,9 +125,111 @@ static String attr(uint8_t id) {
   return "";
 }
 
+// Nordic UART：桌面端写进来的是一行一行的 JSON，攒到 \n 再交给任务处理
+class NusRx : public NimBLECharacteristicCallbacks {
+  String buf;
+  void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &ci) override {
+    buddyHandle = ci.getConnHandle();
+    std::string v = c->getValue();
+    for (char ch : v) {
+      if (ch == '\n') {
+        if (buf.length()) { char *line = strdup(buf.c_str()); if (xQueueSend(lineQ, &line, 0) != pdTRUE) free(line); }
+        buf = "";
+      } else if (buf.length() < 6000) buf += ch;
+    }
+  }
+} nusRx;
+
+static void buddySend(const String &line) {  // 按 MTU 切开发
+  uint16_t h = buddyHandle;
+  if (!nusTx || h == 0xFFFF) return;
+  String l = line + "\n";
+  NimBLEServer *srv = NimBLEDevice::getServer();
+  size_t mtu = srv ? srv->getPeerMTU(h) : 23;
+  size_t step = mtu > 3 ? mtu - 3 : 20;
+  for (size_t i = 0; i < l.length(); i += step) nusTx->notify((const uint8_t *)l.c_str() + i, min(step, l.length() - i), h);
+}
+
+static void buddyLine(const char *line) {
+  JsonDocument doc;
+  if (deserializeJson(doc, line)) return;
+  if (doc["time"].is<JsonArray>()) buddyTimeEpoch = (int64_t)doc["time"][0].as<long long>() + doc["time"][1].as<long>();
+  const char *cmd = doc["cmd"] | "";
+  if (*cmd) {
+    String c = cmd;
+    if (c == "char_begin" || c == "file" || c == "chunk" || c == "file_end" || c == "char_end") return;  // 不收推送的文件夹：不回，桌面端会超时
+    JsonDocument ack;
+    ack["ack"] = c;
+    ack["ok"] = true;
+    ack["n"] = 0;
+    if (c == "status") {
+      JsonObject d = ack["data"].to<JsonObject>();
+      d["name"] = BUDDY_NAME;
+      NimBLEServer *srv = NimBLEDevice::getServer();
+      d["sec"] = srv && buddyHandle != 0xFFFF && srv->getPeerInfoByHandle(buddyHandle).isEncrypted();
+      if (netBatPercent >= 0) { d["bat"]["pct"] = netBatPercent; d["bat"]["usb"] = (bool)netBatUsb; }
+      d["sys"]["up"] = millis() / 1000;
+      d["sys"]["heap"] = ESP.getFreeHeap();
+      d["stats"]["appr"] = statAppr;
+      d["stats"]["deny"] = statDeny;
+    } else if (c == "unpair") {  // 只删 Mac 这一个的配对，iPhone 的留着
+      NimBLEServer *srv = NimBLEDevice::getServer();
+      if (srv && buddyHandle != 0xFFFF) NimBLEDevice::deleteBond(srv->getPeerInfoByHandle(buddyHandle).getIdAddress());
+    }
+    String out;
+    serializeJson(ack, out);
+    buddySend(out);
+    return;
+  }
+  if (doc["total"].is<int>()) {  // 心跳
+    buddyLastBeat = millis();
+    buddyConnected = true;
+    buddyTotal = doc["total"] | 0;
+    buddyRunning = doc["running"] | 0;
+    buddyWaiting = doc["waiting"] | 0;
+    strlcpy(buddyMsg, doc["msg"] | "", sizeof(buddyMsg));
+    const char *id = doc["prompt"]["id"] | "";
+    if (*id && strcmp(id, buddyPromptId)) {
+      strlcpy(buddyTool, doc["prompt"]["tool"] | "", sizeof(buddyTool));
+      strlcpy(buddyHint, doc["prompt"]["hint"] | "", sizeof(buddyHint));
+      strlcpy(buddyPromptId, id, sizeof(buddyPromptId));
+      buddyPromptSeq++;
+      logf("buddy: prompt %s\n", buddyTool);
+    } else if (!*id) buddyPromptId[0] = 0;
+  }
+}
+
+static void buddyStep() {
+  static uint32_t lastAdvCheck = 0;  // 连着一个设备时也要继续广播，另一个（iPhone / Mac）才连得进来
+  if (millis() - lastAdvCheck > 3000) {
+    lastAdvCheck = millis();
+    NimBLEServer *srv = NimBLEDevice::getServer();
+    NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
+    if (srv && adv && srv->getConnectedCount() < 3 && !adv->isAdvertising()) adv->start();
+  }
+  char *line;
+  while (xQueueReceive(lineQ, &line, 0) == pdTRUE) { buddyLine(line); free(line); }
+  if (buddyConnected && millis() - buddyLastBeat > 30000) buddyConnected = false;
+  int d = buddyDecision;
+  if (d && buddyPromptId[0]) {
+    JsonDocument j;
+    j["cmd"] = "permission";
+    j["id"] = buddyPromptId;
+    j["decision"] = d == 1 ? "once" : "deny";
+    String out;
+    serializeJson(j, out);
+    buddySend(out);
+    if (d == 1) statAppr++; else statDeny++;
+    logf("buddy: %s\n", d == 1 ? "approved" : "denied");
+    buddyPromptId[0] = 0;
+  }
+  buddyDecision = 0;
+}
+
 static void ancsTask(void *) {
   NimBLERemoteCharacteristic *ctrl = nullptr;
   for (;;) {
+    buddyStep();
     if (needSetup && client) {
       needSetup = false;
       vTaskDelay(pdMS_TO_TICKS(800));
@@ -153,6 +284,7 @@ static void ancsTask(void *) {
 // ---------- 蓝牙配 WiFi ----------
 // LightBlue 里连上板子 → "WiFi 设置"这一项：写 "名字|密码" 加网络、"del:名字" 删、"clear" 清空；读出来是已存的和当前连的。
 // 读写都要求已配对（加密）：在公开场合别人装了 LightBlue 也改不了
+static NimBLEUUID NUS_SVC("6e400001-b5a3-f393-e0a9-e50e24dcca9e"), NUS_RX("6e400002-b5a3-f393-e0a9-e50e24dcca9e"), NUS_TX("6e400003-b5a3-f393-e0a9-e50e24dcca9e");
 static NimBLEUUID WIFI_SVC("B8E0A001-5C3D-4F2A-9E1B-7A2C3D4E5F60");
 static NimBLEUUID WIFI_CHR("B8E0A002-5C3D-4F2A-9E1B-7A2C3D4E5F60");
 
@@ -171,11 +303,49 @@ class WifiCallbacks : public NimBLECharacteristicCallbacks {
   }
 } wifiCallbacks;
 
+void ancsLowPower(bool on) {
+  uint16_t h = connHandle;
+  if (h == 0xFFFF) return;
+  NimBLEServer *srv = NimBLEDevice::getServer();
+  if (!srv) return;
+  // 单位：间隔 1.25ms，超时 10ms。iOS 要求：间隔 ≤ 2 秒，间隔 ×（延迟 + 1）≤ 6 秒，超时 ≥ 间隔 ×（延迟 + 1）× 3
+  if (on) srv->updateConnParams(h, 384, 576, 2, 700);  // 480–720ms，可跳过 2 次
+  else srv->updateConnParams(h, 24, 40, 0, 400);       // 30–50ms
+  logf("ble: conn params %s\n", on ? "slow (deep sleep)" : "normal");
+}
+
+void ancsDebug(bool restart) {  // 串口 "G?" / "G!"：看蓝牙广播状态 / 重新开广播
+  NimBLEServer *srv = NimBLEDevice::getServer();
+  NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
+  if (restart) { adv->stop(); bool ok = adv->start(); logf("ble: re-advertise %d\n", ok); }
+  logf("ble: advertising=%d connected=%d bonds=%d ancs=%d buddyHandle=%d\n", adv->isAdvertising(), srv ? srv->getConnectedCount() : -1,
+       NimBLEDevice::getNumBonds(), (int)ancsConnected, (int)buddyHandle);
+}
+
 void ancsBegin() {
   pendQ = xQueueCreate(6, sizeof(Pending));
-  NimBLEDevice::init(BLE_NAME);
+  NimBLEDevice::init(BUDDY_NAME);  // 正式名字也要以 Claude 开头：Mac 配对后会记住这个名字，桌面端按它过滤
+  // 换一个固定的随机静态地址（存 NVS）：升级前 Mac / iPhone 记住的是旧地址下不带 Claude 的旧名字，桌面端会把它过滤掉。
+  // 新地址 = 全新设备，名字重新读；旧配对作废，第一次换地址时清掉（iPhone 要重新配对一次）
+  {
+    Preferences bp;
+    bp.begin("ble", false);
+    uint8_t addr[6];
+    if (bp.getBytesLength("addr") == 6) bp.getBytes("addr", addr, 6);
+    else {
+      esp_fill_random(addr, 6);
+      addr[5] |= 0xC0;  // 随机静态地址：最高两位为 1（NimBLE 地址是小端，addr[5] 是最高字节）
+      bp.putBytes("addr", addr, 6);
+      NimBLEDevice::deleteAllBonds();
+      logf("ble: new random address, bonds cleared\n");
+    }
+    bp.end();
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+    NimBLEDevice::setOwnAddr(addr);
+  }
   NimBLEDevice::setSecurityAuth(true, false, true);          // 绑定 + 安全连接，不用输配对码
-  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);  // iPhone 上点"配对"就行
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);  // 配对码显示在屏幕上（Claude 桌面端要求加密配对；已配对的 iPhone 不受影响）
+  NimBLEDevice::setMTU(247);
   NimBLEServer *srv = NimBLEDevice::createServer();
   srv->setCallbacks(&callbacks);
   srv->advertiseOnDisconnect(true);
@@ -185,15 +355,24 @@ void ancsBegin() {
   wc->setCallbacks(&wifiCallbacks);
   wc->createDescriptor("2901")->setValue("WiFi设置：写 名字|密码");  // LightBlue 里显示的名字
   ws->start();
+  // Claude 桌面端 Hardware Buddy：Nordic UART，读写都要加密
+  lineQ = xQueueCreate(8, sizeof(char *));
+  NimBLEService *nus = srv->createService(NUS_SVC);
+  NimBLECharacteristic *rx = nus->createCharacteristic(NUS_RX, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::WRITE_ENC);
+  rx->setCallbacks(&nusRx);
+  nusTx = nus->createCharacteristic(NUS_TX, NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ_ENC);
+  nus->start();
   NimBLEAdvertising *adv = srv->getAdvertising();
   NimBLEAdvertisementData ad;
   ad.setFlags(0x06);
   ad.addServiceUUID(ANCS_SVC);  // 声明要用 ANCS，iPhone 才会把通知给它
   adv->setAdvertisementData(ad);
   NimBLEAdvertisementData sr;
-  sr.setName(BLE_NAME);
+  sr.addServiceUUID(NUS_SVC);  // Claude 桌面端按 Nordic UART + 名字以 Claude 开头来找设备
+  sr.setName(BUDDY_ADV_NAME);
   adv->setScanResponseData(sr);
-  adv->start();
+  bool advOk = adv->start();
+  logf("ble: adv start %d\n", advOk);
   xTaskCreatePinnedToCore(ancsTask, "ancs", 6144, nullptr, 1, nullptr, 0);
-  logf("ble: advertising as %s\n", BLE_NAME);
+  logf("ble: advertising as %s\n", BUDDY_NAME);
 }

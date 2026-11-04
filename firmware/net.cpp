@@ -9,6 +9,8 @@ volatile int netPendingFace = -1;
 volatile bool netTimeReady = false;
 volatile int64_t netLocalEpoch = 0;
 volatile bool netOnline = false;
+volatile bool netWifiPause = false;
+volatile bool netSlowLoop = false;
 char netSayBuf[640];
 volatile bool netSayReady = false;
 volatile bool netSayHold = false;
@@ -348,8 +350,30 @@ static void netTask(void *) {
   bool started = false;
   bool wasWifi = false;
   uint32_t lastPing = 0, lastTime = 0, lastBat = 0, lastTry = 0, connectedAt = 0;
+  bool paused = false;
 
   for (;;) {
+    if (netWifiPause) {  // 夜里深睡：整个关掉 WiFi，最省电
+      if (!paused) {
+        paused = true;
+        if (cloudOn) ws.disconnect();
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        netOnline = false;
+        netBridgeOnline = false;
+        wasWifi = false;
+        connectedAt = 0;
+        logf("wifi off (night sleep)\n");
+      }
+      vTaskDelay(pdMS_TO_TICKS(500));
+      continue;
+    }
+    if (paused) {
+      paused = false;
+      WiFi.mode(WIFI_STA);
+      lastTry = 0;
+      logf("wifi back on\n");
+    }
     if (netWifiCmdReady) {  // 蓝牙 / 串口来的 WiFi 设置
       handleWifiCmd(netWifiCmd);
       netWifiCmdReady = false;
@@ -435,7 +459,7 @@ static void netTask(void *) {
         lastTime = now;
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(netSlowLoop ? 100 : 10));
   }
 }
 

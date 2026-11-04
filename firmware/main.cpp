@@ -121,6 +121,9 @@ const int PTT_PIN = 0;   // BOOT 键
 bool focusActive = false;  // 专注中（番茄钟）
 uint32_t focusStart = 0, focusMs = 0;
 uint32_t nodAt = 0, perkAt = 0;
+bool startled = false;              // 掉下去：瞪眼"啊！"
+uint32_t startleAt = 0, landedAt = 0;
+uint32_t dizzyUntil = 0, dizzyStart = 0;  // 被转晕：蚊香眼
 Expr expr = CALM;
 uint32_t exprStart = 0;
 float exprDur = 0;            // 自动回到平静的时长（秒），0 = 一直保持
@@ -331,8 +334,67 @@ void stepSubtitle(uint32_t now) {
   faceDY += ((subActive || subAlpha > 0.3f ? FACE_UP : 0) - faceDY) * 0.15f;
 }
 
-// 点屏幕时先问字幕：正在说 → 翻下一页 / 结束；有未读圆点 → 重播。返回 true 表示这次点击被字幕用掉了
+void noteActivity(uint32_t now);  // 定义在 low power 一节
+// ---------- 阅读视图 ----------
+// 多于两行的消息：点一下 → 脸让开，整条铺开（一屏约 7 行），上下划滚动，左右划翻历史，点一下关，1 分钟不动自己关
+bool readerOn = false;
+String readerLines[60];
+int readerN = 0, readerTop = 0;
+uint32_t readerAt = 0;
+const int READER_W = 330, READER_LH = 36, READER_Y0 = 112, READER_ROWS = 7;
+
+void openReader(uint32_t now, const String &txt) {
+  readerN = 0;
+  String cur = "";
+  int w = 0;
+  const uint8_t *p = (const uint8_t *)txt.c_str();
+  while (*p && readerN < 60) {
+    uint32_t cp = *p;
+    int n = cp < 0x80 ? 1 : cp < 0xE0 ? 2 : cp < 0xF0 ? 3 : 4;
+    if (n == 3) cp = ((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+    int gw = cp >= 0x2E80 ? 32 : 16;
+    if (cp == '\n' || w + gw > READER_W) {
+      readerLines[readerN++] = cur;
+      cur = ""; w = 0;
+      if (cp == '\n' || cp == ' ') { p += n; continue; }
+    }
+    for (int i = 0; i < n; i++) cur += (char)p[i];
+    w += gw;
+    p += n;
+  }
+  if (cur.length() && readerN < 60) readerLines[readerN++] = cur;
+  readerTop = 0;
+  readerOn = true;
+  readerAt = now;
+  subActive = false;
+  subUnread = false;
+  noteActivity(now);
+}
+
+void readerScroll(uint32_t now, int d) {
+  readerAt = now;
+  readerTop = constrain(readerTop + d, 0, max(0, readerN - READER_ROWS));
+}
+
+void drawReader(uint32_t now) {
+  gfx->setFont(u8g2_font_unifont_h_chinese);
+  gfx->setUTF8Print(true);
+  gfx->setTextSize(2);
+  gfx->setTextColor(rgb(235, 235, 226));
+  for (int k = 0; k < READER_ROWS && readerTop + k < readerN; k++) {
+    gfx->setCursor(233 - READER_W / 2 - OX, READER_Y0 + k * READER_LH + 28 - OY);
+    gfx->print(readerLines[readerTop + k]);
+  }
+  if (readerN > READER_ROWS) {  // 右边一条小滚动条
+    int h = 230, y = 118 + h * readerTop / readerN, hh = max(20, h * READER_ROWS / readerN);
+    gfx->fillRoundRect(424 - OX, 118 - OY, 4, h, 2, rgb(50, 50, 50));
+    gfx->fillRoundRect(424 - OX, y - OY, 4, hh, 2, ACCENT);
+  }
+}
+
+// 点屏幕时先问字幕：长消息 → 打开阅读视图；正在说 → 翻下一页 / 结束；有未读圆点 → 重播。返回 true 表示这次点击被字幕用掉了
 bool subtitleTap(uint32_t now) {
+  if ((subActive || subUnread) && subLineN > 2) { String t = subText; openReader(now, t); return true; }  // 长消息：点开看全文
   if (subActive) {
     if ((subPage + 1) * 2 < subLineN) { subPage++; subPageStart = now; subAlpha = 0.25f; }
     else subActive = false;  // 看过了，不留圆点
@@ -371,10 +433,31 @@ void drawSubtitle() {
     gfx->setCursor(233 - subLineW[i] / 2 - OX, SUB_TOP[k] + 28 - OY);  // u8g2 字体以基线定位
     gfx->print(subLines[i]);
   }
+  if (subLineN > 2 && subActive) {  // 还有下一屏：提示可以点开看全文
+    gfx->setTextSize(1);
+    gfx->setTextColor(rgb(g / 2, g / 2, g / 2));
+    gfx->setCursor(233 - 40 - OX, 418 - OY);
+    gfx->print("点开看全文");
+  }
 }
 
 void drawBattery();  // 定义在 battery 一节
 void drawFocusRing(uint32_t now);  // 定义在 focus 一节
+void drawSpiral(float cx, float cy, float rot);  // 定义在 motion 一节
+void updateNod(uint32_t now);      // 定义在 listening 一节
+extern uint32_t chargeAt;          // 定义在 battery 一节
+void playChime(float f1, float f2, float len, float gain);  // 定义在 timers 一节
+int minutesToAlarm(int within, String &when);  // 定义在 alarm 一节：多久后响（分钟），-1 = within 分钟内没有
+void startDraw(uint32_t now);      // 摇一摇抽签
+void swipeHist(uint32_t now, bool older);
+void loadHist();
+void addHist(const char *txt);
+extern uint32_t lastTouchAt, msgArrivedAt, msgRemindAt;
+extern int msgRemindN;
+void drawBuddy(uint32_t now);      // Claude 桌面端
+extern bool buddyAsking;
+void buddyDecide(uint32_t now, bool approve);
+extern uint32_t touchDownAtG;
 extern bool alarmRinging;  // 定义在 alarm 一节
 void stopRinging(uint32_t now, bool snooze);
 void loadAlarms();
@@ -390,19 +473,36 @@ void render(uint32_t now) {
   float lid = max(cur.lid, blink);
   float arc = (blink > cur.lid) ? 2 : cur.arc;
 
-  drawEyeSide(-EYE_X + lookX + sway, cur.topL + lookY, cur.botL + lookY, lid, arc, cur.happy);
-  if (cur.wink > 0.5f && lid < 0.85f) drawEyeSide(EYE_X + lookX + sway, cur.topR + lookY, cur.botR + lookY, 1, -5);
-  else drawEyeSide(EYE_X + lookX + sway, cur.topR + lookY, cur.botR + lookY, lid, arc, cur.happy);
-  drawBlush(cur.blush);  // 画在眼睛后面：笑眼"咬"的那一块不会把脸红擦掉
-  drawBrow(cur.bl);
-  drawBrow(cur.br);
-  drawMouth(cur.smile);
+  if (readerOn) drawReader(now);  // 阅读视图：脸让开
+  else {
+    if (dizzyUntil) {  // 晕：蚊香眼，左右晃
+      float wob = sinf(now / 180.0f) * 2.0f;
+      float rot = (now - dizzyStart) / 1000.0f * 9.0f;
+      drawSpiral(-EYE_X + wob, 0, rot);
+      drawSpiral(EYE_X + wob, 0, rot);
+    } else {
+      drawEyeSide(-EYE_X + lookX + sway, cur.topL + lookY, cur.botL + lookY, lid, arc, cur.happy);
+      if (cur.wink > 0.5f && lid < 0.85f) drawEyeSide(EYE_X + lookX + sway, cur.topR + lookY, cur.botR + lookY, 1, -5);
+      else drawEyeSide(EYE_X + lookX + sway, cur.topR + lookY, cur.botR + lookY, lid, arc, cur.happy);
+    }
+    drawBlush(cur.blush);  // 画在眼睛后面：笑眼"咬"的那一块不会把脸红擦掉
+    drawBrow(cur.bl);
+    drawBrow(cur.br);
+    if (startled) {  // 掉下去："啊！"嘴张成小圆
+      for (int i = 0; i < 28; i++) { float a = i * 6.283f / 28; dot(3.2f * cosf(a), 27 + 3.2f * sinf(a), 2.0f, WHITE); }
+    } else if (dizzyUntil) {  // 晕：嘴是一道波浪
+      for (int i = 0; i <= 30; i++) { float u = -7 + 14.0f * i / 30; dot(u, 26 + sinf(u * 1.3f + now / 150.0f) * 1.2f, 2.0f, WHITE); }
+    } else {
+      drawMouth(cur.smile);
+    }
 
-  if (expr == MUSIC) drawNote(fmodf(t / 2.2f, 1.0f));
-  if (expr == SLEEP && t > 1.2f) {
-    if (fmodf(t, 2.4f) > 0.3f) drawZ(26, -27, 7, 7);
-    if (fmodf(t, 2.4f) > 1.0f) drawZ(37, -37, 5, 5);
+    if (expr == MUSIC) drawNote(fmodf(t / 2.2f, 1.0f));
+    if (expr == SLEEP && t > 1.2f) {
+      if (fmodf(t, 2.4f) > 0.3f) drawZ(26, -27, 7, 7);
+      if (fmodf(t, 2.4f) > 1.0f) drawZ(37, -37, 5, 5);
+    }
   }
+  drawBuddy(now);
   drawSubtitle();
   drawUnreadDot(now);
   drawPttDot(now);
@@ -473,6 +573,10 @@ void step(uint32_t now) {
     tgt.arc = 3;
   }
   if (focusActive) tgt.bright = min(tgt.bright, 110.0f);  // 专注中屏幕调暗
+  if (chargeAt && now - chargeAt < 2500) {  // 刚插上电：满足地眯一下眼
+    tgt.lid = 1;
+    tgt.arc = -6;
+  }
   if (petting) {  // 被摸的时候舒服地眯眼（^ ^）、脸红
     tgt.lid = 1;
     tgt.arc = -6;
@@ -481,16 +585,31 @@ void step(uint32_t now) {
     tgt.bright = max(tgt.bright, 180.0f);
   }
 
-  float k = 0.25f;
-  cur.topL = ap(cur.topL, tgt.topL, k); cur.botL = ap(cur.botL, tgt.botL, k);
-  cur.topR = ap(cur.topR, tgt.topR, k); cur.botR = ap(cur.botR, tgt.botR, k);
+  if (startled) {  // 掉下去：眼睛瞪圆
+    tgt.topL = tgt.topR = -17; tgt.botL = tgt.botR = 15;
+    tgt.lid = 0; tgt.wink = 0; tgt.happy = 0; tgt.blush = 0;
+    tgt.bl.a = tgt.br.a = 0;
+  }
+
+  // 眼睛、眉毛用弹簧跟过去：会微微冲过头再落回（阻尼比约 0.65），比直接滑过去更有弹性；吓一跳时弹簧更硬
+  static uint32_t lastStepAt = 0;
+  float dt = lastStepAt ? constrain((now - lastStepAt) / 1000.0f, 0.005f, 0.06f) : 0.033f;
+  lastStepAt = now;
+  float SK = startled ? 700 : 170, SD = startled ? 40 : 17;
+  auto spr = [&](float &c, float &v, float t) { v += ((t - c) * SK - v * SD) * dt; c += v * dt; };
+  static float sv[12];
+  spr(cur.topL, sv[0], tgt.topL); spr(cur.botL, sv[1], tgt.botL);
+  spr(cur.topR, sv[2], tgt.topR); spr(cur.botR, sv[3], tgt.botR);
+  spr(cur.bl.u1, sv[4], tgt.bl.u1); spr(cur.bl.v1, sv[5], tgt.bl.v1); spr(cur.bl.u2, sv[6], tgt.bl.u2); spr(cur.bl.v2, sv[7], tgt.bl.v2);
+  spr(cur.br.u1, sv[8], tgt.br.u1); spr(cur.br.v1, sv[9], tgt.br.v1); spr(cur.br.u2, sv[10], tgt.br.u2); spr(cur.br.v2, sv[11], tgt.br.v2);
+  float k = startled ? 0.6f : 0.25f;
   cur.wink = tgt.wink;
-  cur.happy = ap(cur.happy, tgt.happy, 0.25f);
-  cur.smile = ap(cur.smile, tgt.smile, 0.2f);
+  cur.happy = ap(cur.happy, tgt.happy, k);
+  cur.smile = ap(cur.smile, tgt.smile, startled ? 0.6f : 0.2f);
   cur.blush = ap(cur.blush, tgt.blush, 0.1f);
   cur.lid = ap(cur.lid, tgt.lid, expr == SLEEP ? 0.5f : 0.3f);
   cur.arc = ap(cur.arc, tgt.arc, 0.4f);
-  apBrow(cur.bl, tgt.bl, k); apBrow(cur.br, tgt.br, k);
+  cur.bl.a = ap(cur.bl.a, tgt.bl.a, k); cur.br.a = ap(cur.br.a, tgt.br.a, k);
   cur.bright = ap(cur.bright, tgt.bright, 0.08f);
 
   // 平静时眼睛偶尔看看别处
@@ -510,12 +629,19 @@ void step(uint32_t now) {
   lookY = ap(lookY, lookTY, 0.2f);
 
   // blink (not while eyes are already closed)
-  bool canBlink = expr != MUSIC && expr != SLEEP && !petting && !covered;
+  bool canBlink = expr != MUSIC && expr != SLEEP && !petting && !covered && !startled && !dizzyUntil;
   if (!blinking && canBlink && now > nextBlink) { blinking = true; blinkStart = now; }
-  if (blinking) {
-    float bt = (now - blinkStart) / 90.0f;
-    blink = bt < 1 ? bt : max(0.0f, 2 - bt);
-    if (bt >= 2) { blinking = false; blink = 0; nextBlink = now + random(2500, 6000); }
+  if (blinking) {  // 快闭（70ms，越闭越快）→ 停一下 → 慢睁（140ms，最后慢慢睁开）；15% 连眨两下
+    static bool doubleDone = false;
+    uint32_t e = now - blinkStart;
+    if (e < 70) { float u = e / 70.0f; blink = u * u; }
+    else if (e < 110) blink = 1;
+    else if (e < 250) { float u = (e - 110) / 140.0f; blink = (1 - u) * (1 - u); }
+    else {
+      blinking = false; blink = 0;
+      if (!doubleDone && random(100) < 15) { doubleDone = true; nextBlink = now + 110; }
+      else { doubleDone = false; nextBlink = now + random(2500, 6000); }
+    }
   }
 }
 
@@ -523,17 +649,65 @@ void step(uint32_t now) {
 // 每 10 秒读一次；没插电时 20% / 10% 各用字幕提醒一次；低于 15% 在下方露一个小电池
 PowerState bat;
 
+// 插电反应：像吃到东西，眯眼"嗯↗"；电快没了时插上 → 长叹一口气"……活过来了。"；夜里有闹钟 → 顺便确认明早几点叫
+uint32_t chargeAt = 0;
+void chargeReact(uint32_t now) {
+  chargeAt = now;
+  noteActivity(now);
+  lastInteract = now;
+  if (expr == SLEEP && autoNight) setExpr(CALM);
+  String when;
+  int h = localHour();
+  if (bat.percent >= 0 && bat.percent <= 20) {
+    playChime(660, 440, 0.9f, 0.25f);
+    sayText("……活过来了。");
+  } else if (timeKnown && (h >= 21 || h < 6) && minutesToAlarm(12 * 60, when) >= 0) {
+    playChime(523, 784, 0.5f, 0.25f);
+    sayText(("插上了。明早 " + when + " 叫你。").c_str());
+  } else {
+    playChime(523, 784, 0.5f, 0.25f);
+    const char *l[] = { "嗯——。", "吃饭了。", "充上了。" };
+    if (random(100) < 60) sayText(l[random(3)]);
+  }
+  logf("plugged in (%d%%)\n", bat.percent);
+}
+
 void stepBattery(uint32_t now) {
   static uint32_t lastRead = 0;
   static bool warned20 = false, warned10 = false;
-  if (lastRead && now - lastRead < 10000) return;
+  extern bool lowPower;
+  if (lastRead && now - lastRead < (lowPower ? 10000UL : 2000UL)) return;  // 醒着 2 秒读一次：插电马上有反应
   lastRead = now;
   bat = powerRead();
   netBatPercent = bat.percent;
   netBatCharging = bat.charging;
   netBatUsb = bat.usb;
   if (!bat.battery || bat.percent < 0) return;
-  if (bat.usb) { warned20 = warned10 = false; return; }
+  // 夜里有闹钟要响却没插电：拔线时马上提醒；电低于 30% 再急一点（电池撑不了一整夜，半夜没电关机早上就叫不了）
+  static bool lastUsb = true, warnedNight = false, firstRead = true;
+  if (firstRead) { firstRead = false; lastUsb = bat.usb; }  // 开机第一次读：不算插拔
+  bool justUnplugged = lastUsb && !bat.usb;
+  bool justPlugged = !lastUsb && bat.usb;
+  lastUsb = bat.usb;
+  if (justPlugged) chargeReact(now);
+  if (bat.usb) { warned20 = warned10 = warnedNight = false; return; }
+  int h = localHour();
+  bool evening = timeKnown && (h >= 21 || h < 6);
+  String when;
+  if (evening && minutesToAlarm(12 * 60, when) >= 0) {
+    if (justUnplugged) {
+      setExpr(CURIOUS, 4);
+      sayText(("拔电了？明早 " + when + " 还要叫你，插着吧。").c_str(), true);
+      playChime(1318, 1760, 0.5f, 0.3f);
+      logf("unplugged with alarm %s\n", when.c_str());
+    } else if (bat.percent <= 30 && !warnedNight) {
+      warnedNight = true;
+      setExpr(CURIOUS, 5);
+      sayText(("电只剩 " + String(bat.percent) + "%，撑不到明早 " + when + " 叫你。快插电。").c_str(), true);
+      playChime(988, 740, 0.8f, 0.4f);
+      logf("low battery before alarm\n");
+    }
+  }
   if (bat.percent <= 10 && !warned10) {
     warned10 = warned20 = true;
     setExpr(CURIOUS, 4);
@@ -583,7 +757,11 @@ void stepBedtime(uint32_t now) {
     lastNag = now;
     if (expr == SLEEP && autoNight) setExpr(CALM);
     setExpr(CURIOUS, 4);
-    sayText(BED_FIRST[random(3)]);
+    String when;
+    if (bat.battery && !bat.usb && minutesToAlarm(12 * 60, when) >= 0)  // 有闹钟却没插电：提醒插电（不然半夜没电，早上叫不了）
+      sayText(("该睡了。明早 " + when + " 叫你，先给我插上电。").c_str(), true);
+    else
+      sayText(BED_FIRST[random(3)]);
     logf("bedtime reminder\n");
     return;
   }
@@ -599,7 +777,29 @@ void stepBedtime(uint32_t now) {
 }
 
 // ---------- motion ----------
-// 拿起 → 醒过来"嗯？"；用力摇 → 嫌弃；屏幕扣在桌上 3 秒 → 睡觉变暗，翻过来就醒
+// 拿起 → 醒过来"嗯？"；用力摇 → 嫌弃地瞥一眼，然后抽一支签；屏幕扣在桌上 3 秒 → 睡觉变暗，翻过来就醒
+// 掉下去 → 瞪眼"啊！"，接住 / 落地后嘟囔一句；转一圈半以上 → 蚊香眼晕 3 秒多，缓过来眨眨眼
+void drawSpiral(float cx, float cy, float rot) {
+  for (int i = 0; i <= 70; i++) {
+    float f = i / 70.0f, th = f * 11.0f + rot, r = 0.8f + 8.0f * f;
+    dot(cx + r * cosf(th), cy + r * sinf(th) * 0.95f, 1.8f, WHITE);
+  }
+}
+
+void playStartle() {  // 很短的"！"：音调一下蹿上去
+  const int N = 16000 * 16 / 100;
+  int16_t *pcm = (int16_t *)ps_malloc(N * 2);
+  if (!pcm) return;
+  float ph = 0;
+  for (int i = 0; i < N; i++) {
+    float t = i / 16000.0f;
+    ph += 2 * PI * (700.0f + 900.0f * min(1.0f, t / 0.09f)) / 16000.0f;
+    float env = min(1.0f, t * 300.0f) * min(1.0f, (0.16f - t) * 40.0f);
+    pcm[i] = (int16_t)(sinf(ph) * env * 5000);
+  }
+  audioPlay(pcm, N * 2);
+}
+
 void stepMotion(uint32_t now) {
   if (!mot.ok) return;
   if (mot.faceDown && !faceDownSleep) {
@@ -616,10 +816,51 @@ void stepMotion(uint32_t now) {
     setExpr(CALM);
     logf("face up: wake\n");
   }
+  if (mot.dropped) {
+    mot.dropped = false;
+    startled = true;
+    startleAt = now;
+    landedAt = 0;
+    lastInteract = now;
+    perkAt = now;
+    if (expr == SLEEP && autoNight) setExpr(CALM);
+    playStartle();
+  }
+  if (mot.landed) {
+    mot.landed = false;
+    if (startled && !landedAt) landedAt = now;
+  }
+  if (startled && ((landedAt && now - landedAt > 700) || now - startleAt > 3000)) {
+    startled = false;
+    const char *lines[] = { "……吓我一跳。", "接住了？", "下次说一声。" };
+    setExpr(MEH, 3);
+    sayText(lines[random(3)]);
+  }
+  if (mot.dizzy) {
+    mot.dizzy = false;
+    dizzyStart = now;
+    dizzyUntil = max((uint32_t)1, now + 3500);
+    lastInteract = now;
+    if (expr == SLEEP && autoNight) setExpr(CALM);
+  }
+  if (dizzyUntil && (int32_t)(now - dizzyUntil) >= 0) {
+    if (mot.spin > 180) dizzyUntil = now + 1500;  // 还在转：接着晕
+    else {
+      dizzyUntil = 0;
+      nextBlink = now;
+      setExpr(WINK, 2.5f);
+      if (random(100) < 60) { const char *l[] = { "……别转了。", "天在转。", "我没事。" }; sayText(l[random(3)]); }
+      logf("dizzy over\n");
+    }
+  }
+  // 掉落 / 转晕前后，拿起和摇晃都不算（接住那一下、转的时候受力都很大）
+  bool motionBusy = startled || dizzyUntil || (landedAt && now - landedAt < 2000);
+  if (motionBusy) { mot.shaken = false; mot.pickedUp = false; }
   if (mot.shaken) {
     mot.shaken = false;
     lastInteract = now;
-    setExpr(MEH, 3);
+    setExpr(MEH, 1.2f);  // 先嫌弃地瞥一眼，再抽签
+    startDraw(now);
     logf("shaken\n");
   }
   if (mot.pickedUp && alarmRinging) {  // 拿起来 = 起来了
@@ -637,6 +878,7 @@ void stepMotion(uint32_t now) {
       else if (r < 90) setExpr(WINK, 2.5f);
       else setExpr(SMILE, 3);
     }
+    lastTouchAt = now;  // 拿起来看了：算看过消息
     logf("picked up\n");
   }
 }
@@ -653,6 +895,7 @@ void stepListen(uint32_t now) {
   if (!allowed) {
     listening = false;
     wasVoice = v;
+    updateNod(now);
     return;
   }
   if (v && !listening) {
@@ -683,9 +926,38 @@ void stepListen(uint32_t now) {
     sessionSpeech = 0;
   }
   wasVoice = v;
+  updateNod(now);
+}
+
+// ---------- 跟着节拍点头 ----------
+// 听歌的脸时，用麦克风听鼓点：音量突然比最近的平均高四成 = 一拍，点一下头；
+// 记住拍子间隔，安静的几小节里按节奏接着点（最多 4 下）。戴耳机听不到声音时就只左右摇
+uint32_t beatAt = 0;
+void stepBeat(uint32_t now) {
+  static float avg = 0, period = 0;
+  static uint32_t lastBeat = 0;
+  static int predicted = 0;
+  if (expr != MUSIC) { avg = 0; period = 0; return; }
+  float e = micLevel;
+  if (avg <= 0) avg = e;
+  bool onset = e > avg * 1.4f && e > 30 && now - lastBeat > 280;
+  avg = avg * 0.94f + e * 0.06f;
+  if (onset) {
+    uint32_t iv = now - lastBeat;
+    if (iv > 300 && iv < 1000) period = period ? period * 0.8f + iv * 0.2f : iv;
+    lastBeat = beatAt = now;
+    predicted = 0;
+  } else if (period && now - lastBeat > period * 1.05f && predicted < 4) {
+    lastBeat = beatAt = now;
+    predicted++;
+  }
+}
+
+void updateNod(uint32_t now) {
   float nt = (now - nodAt) / 380.0f;
   float pt = (now - perkAt) / 300.0f;
-  nodY = (nt < 1 ? 2.2f * sinf(nt * PI) : 0) - (pt < 1 ? 2.5f * sinf(pt * PI) : 0);
+  float bt = (now - beatAt) / 220.0f;  // 跟着拍子：短一点、轻一点
+  nodY = (nt < 1 ? 2.2f * sinf(nt * PI) : 0) - (pt < 1 ? 2.5f * sinf(pt * PI) : 0) + (bt < 1 ? 1.6f * sinf(bt * PI) : 0);
 }
 
 // ---------- touch ----------
@@ -754,6 +1026,7 @@ void setup() {
   netResetReason = resetReasonName(esp_reset_reason());
   logf("reset reason: %s\n", netResetReason);
   loadAlarms();
+  loadHist();
   netBegin();
   ancsBegin();
   // 看门狗：主循环 5 秒没转就自动重启（曾经夜里卡死过一整夜）
@@ -827,7 +1100,18 @@ void stepFocus(uint32_t now) {
 // 点阵倒计时：像钟表的分钟刻度，一圈 60 个位置，一个点 = 一分钟，从 12 点顺时针挨着排
 // （点少时挨在一起，不分散成一圈）。超过 60 分钟就排满一圈、一颗代表几分钟。
 // 从 12 点那颗开始一颗一颗消失；下一颗要消失的会轻轻呼吸，看得出时间在走
+bool knobMode = false;  // 双击后拧它：调专注时间（定义在下面的旋钮一节）
+int knobMin = 25;
+
 void drawFocusRing(uint32_t now) {
+  if (knobMode) {  // 拧的时候先预览：几分钟就几颗点
+    int cx = 233 - OX, cy = 233 - OY;
+    for (int i = 0; i < min(knobMin, 60); i++) {
+      float a = (-90.0f + i * 6.0f) * DEG_TO_RAD;
+      gfx->fillCircle(cx + (int)lroundf(cosf(a) * 215), cy + (int)lroundf(sinf(a) * 215), 5, ACCENT);
+    }
+    return;
+  }
   if (!focusActive) return;
   int minutes = (int)(focusMs / 60000UL);
   int n = min(minutes, 60);
@@ -925,6 +1209,52 @@ void sayNearestTimer(uint32_t now) {
   sayText((head + "还剩 " + String(left) + " 分钟" + (n > 1 ? "（一共 " + String(n) + " 个提醒）" : "") + "。").c_str());
 }
 
+// ---------- 旋钮（双击后拧它调专注时间）----------
+// 双击屏幕 → 外圈亮 25 颗点、显示"25 分钟"，这时平放在桌上拧它：顺时针加、逆时针减，每 30° 加减 5 分钟（0–120），每变一档"嗒"一声。
+// 不动 3 秒就开始；点一下马上开始；拧到 0 = 取消。（不做成"平放一拧就进入"：拿起来时会误触）
+uint32_t knobLastMove = 0;
+float knobAngle = 0;
+
+void enterKnob(uint32_t now) {
+  knobMode = true;
+  knobAngle = 0;
+  knobMin = 25;
+  knobLastMove = now;
+  useCanvas(true);
+  setExpr(WINK, 2.5f);
+  sayText("25 分钟。拧我调时间。");
+  logf("knob start\n");
+}
+
+void finishKnob(uint32_t now) {
+  knobMode = false;
+  logf("knob done %d\n", knobMin);
+  if (knobMin >= 5) startFocus(now, knobMin);
+  else { useCanvas(false); sayText("好，不专注了。"); }
+}
+
+void stepKnob(uint32_t now) {
+  static uint32_t last = 0;
+  float dt = last ? constrain((now - last) / 1000.0f, 0.0f, 0.1f) : 0;
+  last = now;
+  if (!knobMode) return;
+  if (focusActive || alarmRinging || dizzyUntil || startled || covered) {
+    knobMode = false;
+    if (!focusActive) useCanvas(false);
+    logf("knob cancelled\n");
+    return;
+  }
+  float r = -mot.rateZ;  // 正面朝上时 rateZ 为正 = 逆时针，取反让顺时针为正
+  if (fabsf(r) > 15 && fabsf(r) < 260) { knobAngle += r * dt; knobLastMove = now; lastInteract = now; noteActivity(now); }
+  int m = constrain(25 + (int)lroundf(knobAngle / 30.0f) * 5, 0, 120);
+  if (m != knobMin) {
+    knobMin = m;
+    playChime(2200, 2200, 0.03f, 0.2f);  // 很轻的"嗒"
+    sayText(m ? (String(m) + " 分钟").c_str() : "取消");
+  }
+  if (now - knobLastMove > 3000) finishKnob(now);
+}
+
 // ---------- alarm（叫起床）----------
 // 最多 3 个闹钟，存在 NVS 里（重启不丢）。"L<hh>:<mm>|<星期掩码>"：bit0=周日…bit6=周六，128=只响一次；"L0" 全部取消。
 // 到点：先轻提示音（每 8 秒、越来越响）→ 1 分钟后换叫醒声音（有 wake_voice.h 就放录好的声音，每 30 秒，越来越大声）→ 最多 10 分钟。
@@ -964,6 +1294,29 @@ String alarmDesc(const Alarm &a) {
   if ((a.mask & 0x7F) == 0x3E) return String("工作日 ") + t;
   if ((a.mask & 0x7F) == 0x41) return String("周末 ") + t;
   return String(t);
+}
+
+int minutesToAlarm(int within, String &when) {
+  if (!timeKnown) return -1;
+  int64_t l = localNow();
+  int32_t today = (int32_t)(l / 86400);
+  int nowMin = (int)((l % 86400) / 60);
+  int best = -1;
+  for (auto &a : alarms) {
+    if (!a.on) continue;
+    for (int d = 0; d <= 1; d++) {
+      int wday = (int)((today + d + 4) % 7);
+      bool fires = (a.mask & 128) || (a.mask & (1 << wday));
+      int mins = d * 1440 + a.h * 60 + a.m - nowMin;
+      if (fires && mins > 0 && mins <= within && (best < 0 || mins < best)) {
+        best = mins;
+        char t[8];
+        snprintf(t, sizeof(t), "%d:%02d", a.h, a.m);
+        when = t;
+      }
+    }
+  }
+  return best;
 }
 
 void addAlarm(int h, int m, int mask) {
@@ -1085,6 +1438,227 @@ void stepAlarm(uint32_t now) {
   }
 }
 
+// ---------- 摇一摇抽签 ----------
+// 使劲摇 → 嫌弃地瞥一眼 → 字幕像老虎机一样翻，越翻越慢，"嗒"停在一个答案上。夜里"先睡觉"抽到得多
+const char *DRAW_ANSWERS[] = {
+  "可以。", "别。", "去吧。", "再想想。", "明天再说。", "先吃饭。", "先睡觉。", "你心里已经有答案了。",
+  "听你的。", "不行。", "行，就这个。", "少吃一点就行。", "先喝口水。", "问我的话：要。", "不急，等等再定。",
+  "这个可以有。", "选第一个。", "选你刚才犹豫的那个。", "去做，我在。", "抽到这个，就别再摇了。",
+};
+const int DRAW_N = sizeof(DRAW_ANSWERS) / sizeof(DRAW_ANSWERS[0]);
+const uint16_t DRAW_GAPS[] = { 80, 85, 95, 110, 130, 155, 190, 240, 310 };  // 每翻一下之后等多久（越来越慢）
+const int DRAW_FLIPS = sizeof(DRAW_GAPS) / sizeof(DRAW_GAPS[0]);
+uint32_t drawStart = 0, drawNextAt = 0;
+int drawFlip = 0, drawLast = -1;
+
+int pickAnswer() {
+  for (;;) {
+    int i;
+    if (isNight() && random(100) < 35) i = 6;  // 夜里：先睡觉
+    else i = random(DRAW_N);
+    if (i != drawLast) { drawLast = i; return i; }
+  }
+}
+
+void startDraw(uint32_t now) {
+  drawStart = max((uint32_t)1, now);
+  drawNextAt = now + 600;  // 先让嫌弃的表情露一下
+  drawFlip = 0;
+}
+
+void stepDraw(uint32_t now) {
+  if (!drawStart || (int32_t)(now - drawNextAt) < 0) return;
+  noteActivity(now);
+  lastInteract = now;
+  int i = pickAnswer();
+  sayText(DRAW_ANSWERS[i]);
+  if (drawFlip < DRAW_FLIPS) {
+    playChime(2200, 2200, 0.025f, 0.15f);  // 翻一下"嗒"
+    drawNextAt = now + DRAW_GAPS[drawFlip++];
+  } else {  // 停：就是它
+    drawStart = 0;
+    playChime(988, 1319, 0.5f, 0.3f);
+    setExpr(WINK, 3);
+    logf("draw: %s\n", DRAW_ANSWERS[i]);
+  }
+}
+
+// ---------- 消息：没看再提醒 + 历史 ----------
+// 没看再提醒：云端发来的消息 5 分钟后还没看（没点开、没碰过、没拿起）→ 再响一声、脸一提、亮屏；
+// 还没看 10 分钟后再一次，最多两次。夜里不提醒，专注中往后推。
+// 历史：最近 10 条（云端消息 + 当面聊天的回复，不含歌名），存 NVS 重启不丢。
+// 在屏幕上快速左划 = 上一条（带时间），右划 = 往回翻；15 秒没动就退出
+uint32_t lastTouchAt = 0;           // 最近一次碰屏幕 / 拿起来
+uint32_t msgArrivedAt = 0, msgRemindAt = 0;
+int msgRemindN = 0;
+
+struct HistMsg { uint32_t t; char text[160]; };  // t = 本地时间（epoch 秒），0 = 不知道几点
+HistMsg hist[10];
+int histN = 0, histIdx = -1;
+uint32_t histLastAt = 0;
+
+void saveHist() {
+  prefs.begin("companion", false);
+  prefs.putBytes("hist", hist, sizeof(hist));
+  prefs.putUChar("histN", histN);
+  prefs.end();
+}
+
+void loadHist() {
+  prefs.begin("companion", true);
+  if (prefs.getBytesLength("hist") == sizeof(hist)) {
+    prefs.getBytes("hist", hist, sizeof(hist));
+    histN = min(10, (int)prefs.getUChar("histN", 0));
+  }
+  prefs.end();
+}
+
+void addHist(const char *txt) {
+  if (!strcmp(txt, "在。") || !strcmp(txt, "在听。") || !strncmp(txt, "正在听：", strlen("正在听："))) return;
+  for (int i = min(histN, 9); i > 0; i--) hist[i] = hist[i - 1];  // 最新的放在 0
+  hist[0].t = timeKnown ? (uint32_t)localNow() : 0;
+  size_t n = strlen(txt);
+  if (n > sizeof(hist[0].text) - 1) {  // 截断时别切断半个汉字
+    n = sizeof(hist[0].text) - 1;
+    while (n > 0 && ((uint8_t)txt[n] & 0xC0) == 0x80) n--;
+  }
+  memcpy(hist[0].text, txt, n);
+  hist[0].text[n] = 0;
+  histN = min(histN + 1, 10);
+  saveHist();
+}
+
+String histWhen(uint32_t t) {
+  if (!t || !timeKnown) return "";
+  int32_t today = (int32_t)(localNow() / 86400), day = (int32_t)(t / 86400);
+  char hm[8];
+  snprintf(hm, sizeof(hm), "%d:%02d", (int)((t % 86400) / 3600), (int)((t % 3600) / 60));
+  if (day == today) return String("今天 ") + hm;
+  if (day == today - 1) return String("昨天 ") + hm;
+  return String(today - day) + " 天前 " + hm;
+}
+
+void showHist(uint32_t now, int idx) {
+  histIdx = idx;
+  histLastAt = now;
+  String head = histWhen(hist[idx].t);
+  String t = head + "（" + String(idx + 1) + "/" + String(histN) + "）\n" + hist[idx].text;
+  if (readerOn || strlen(hist[idx].text) > 60) openReader(now, t);  // 长的直接用阅读视图
+  else sayText(t.c_str());
+}
+
+void swipeHist(uint32_t now, bool older) {
+  lastTouchAt = now;
+  if (!histN) { sayText("还没有消息。"); return; }
+  if (older) {
+    int i = histIdx < 0 ? 0 : histIdx + 1;
+    if (i >= histN) { histLastAt = now; sayText("没有更早的了。"); return; }
+    showHist(now, i);
+  } else {
+    if (histIdx < 0) return;  // 没在翻历史：右划不做事
+    if (histIdx == 0) { histIdx = -1; subActive = false; subUnread = false; readerOn = false; return; }  // 翻回最新之后再右划：退出
+    showHist(now, histIdx - 1);
+  }
+  playChime(2200, 2200, 0.025f, 0.15f);
+}
+
+void stepMsgRemind(uint32_t now) {
+  if (histIdx >= 0 && now - histLastAt > 15000) histIdx = -1;  // 翻历史 15 秒没动：退出
+  if (!msgRemindAt || (int32_t)(now - msgRemindAt) < 0) return;
+  bool unseen = (subUnread || (subActive && subHold)) && lastTouchAt < msgArrivedAt;
+  if (!unseen || isNight()) { msgRemindAt = 0; return; }
+  if (focusActive || alarmRinging || audioSpeaking) { msgRemindAt = now + 5UL * 60 * 1000; return; }
+  playChime(1318, 1760, 0.5f, 0.35f);
+  noteActivity(now);
+  perkAt = now;
+  msgRemindN++;
+  msgRemindAt = msgRemindN < 2 ? now + 10UL * 60 * 1000 : 0;
+  logf("unread reminder %d\n", msgRemindN);
+}
+
+// ---------- Claude 桌面端 Hardware Buddy ----------
+// Claude 桌面端（Code / Cowork）在干活：脸下面三颗小点轮流跳。需要批准：挑眉"嗯？"，显示工具和命令，
+// 长按 1 秒批准（外圈点阵走满），点一下拒绝。配对时屏幕上显示 6 位配对码
+bool buddyAsking = false;
+uint32_t buddySeenSeq = 0, buddyPkSeen = 0, touchDownAtG = 0;
+
+String clip(const char *s, int maxW) {  // 按字幕宽度截断（汉字 32、其它 16 像素）
+  String out;
+  int w = 0;
+  const uint8_t *p = (const uint8_t *)s;
+  while (*p) {
+    int n = *p < 0x80 ? 1 : *p < 0xE0 ? 2 : *p < 0xF0 ? 3 : 4;
+    int gw = n >= 3 ? 32 : 16;
+    if (w + gw > maxW - 32) { out += "…"; break; }
+    for (int i = 0; i < n && p[i]; i++) out += (char)p[i];
+    w += gw;
+    p += n;
+  }
+  return out;
+}
+
+void stepBuddy(uint32_t now) {
+  if (buddyPasskeySeq != buddyPkSeen) {
+    buddyPkSeen = buddyPasskeySeq;
+    noteActivity(now);
+    setExpr(CURIOUS, 10);
+    sayText(("蓝牙配对码\n" + String(buddyPasskey)).c_str(), true);
+  }
+  if (buddyTimeEpoch && !timeKnown) { timeBase = buddyTimeEpoch - millis() / 1000; timeKnown = true; }
+  if (buddyPromptSeq != buddySeenSeq && buddyPromptId[0]) {
+    buddySeenSeq = buddyPromptSeq;
+    buddyAsking = true;
+    noteActivity(now);
+    lastInteract = now;
+    readerOn = false;
+    if (expr == SLEEP && autoNight) setExpr(CALM);
+    setExpr(CURIOUS, 600);
+    playChime(1318, 1760, 0.5f, 0.4f);
+    String line1 = String("批准 ") + buddyTool + "？";
+    sayText((clip(line1.c_str(), 360) + "\n" + clip(buddyHint, 320)).c_str(), true);
+  }
+  if (buddyAsking && (!buddyPromptId[0] || !buddyConnected)) {  // 在电脑上处理了，或者断开了
+    buddyAsking = false;
+    subActive = false;
+    setExpr(CALM);
+  }
+}
+
+void buddyDecide(uint32_t now, bool approve) {
+  buddyDecision = approve ? 1 : 2;
+  buddyAsking = false;
+  lastInteract = now;
+  if (approve) { setExpr(WINK, 3); playChime(988, 1319, 0.4f, 0.3f); sayText("批准了。"); }
+  else { setExpr(MEH, 2.5f); playChime(523, 392, 0.4f, 0.3f); sayText("拒绝了。"); }
+}
+
+void drawBuddy(uint32_t now) {
+  if (buddyAsking) {  // 提示 + 长按进度
+    gfx->setFont(u8g2_font_unifont_h_chinese);
+    gfx->setUTF8Print(true);
+    gfx->setTextSize(1);
+    gfx->setTextColor(rgb(0xA0, 0xA0, 0xA0));
+    gfx->setCursor(233 - 84 - OX, 104 - OY);
+    gfx->print("长按批准 · 点一下拒绝");
+    if (touchIsDown && !covered) {
+      float frac = min(1.0f, (now - touchDownAtG) / 1000.0f);
+      int n = (int)(frac * 48);
+      for (int i = 0; i < n; i++) {
+        float a = (-90 + i * 7.5f) * DEG_TO_RAD;
+        gfx->fillCircle(233 - OX + (int)(cosf(a) * 178), 233 - OY + (int)(sinf(a) * 178), 4, ACCENT);
+      }
+    }
+    return;
+  }
+  bool working = buddyConnected && buddyRunning > 0;
+  if (!working || subActive || subUnread || pttActive || readerOn || expr == SLEEP || focusActive || knobMode) return;
+  for (int i = 0; i < 3; i++) {  // 三颗小点轮流往上跳：Claude 在干活
+    float ph = fmodf(now / 900.0f - i * 0.18f, 1.0f);
+    float up = ph < 0.3f ? sinf(ph / 0.3f * PI) : 0;
+    gfx->fillCircle(233 - 18 + i * 18 - OX, 390 - (int)(up * 8) - OY, 4, accentDim(0.5f + 0.5f * up));
+  }
+}
+
 // ---------- iPhone 通知 ----------
 // 来电：挑眉 + 挂"<名字>，来电话了：xx" + 每 3 秒轻轻响一声（最多 30 秒，接了/挂了就停）；微信：只"嗒"一声 + 挂谁发的
 bool callRinging = false;
@@ -1203,18 +1777,28 @@ void stepPTT(uint32_t now) {
 // 用电池时分两层睡（插着电一直醒着）：
 //   浅睡：20 秒没动静 → 关屏、停画、CPU 80MHz。说话（连续 0.5 秒以上）、触摸、拿起、按键、云端消息都能叫醒
 //   深睡：浅睡 5 分钟没人理 → 再关麦克风、WiFi 切最省电模式。喊它不醒，要触摸/拿起/按键/云端消息
+//   夜里：深睡时再整个关掉 WiFi，每 20 分钟开 90 秒收消息、对时（闹钟、计时都在板子上跑，不受影响）
+// 深睡时还会关掉陀螺仪（拿起靠加速度计照样能叫醒）、把和 iPhone 的蓝牙连接间隔放宽
 // 只有浅睡的话，环境吵时麦克风会一直把它叫醒，实测每小时掉 12%
 const uint32_t SLEEP_AFTER_MS = 20000;
 const uint32_t DEEP_AFTER_MS = 5UL * 60 * 1000;
 bool lowPower = false, deepSleep = false;
 uint32_t lastActivity = 0, sleptAt = 0;
 bool forceBattery = false;  // 调试：串口 B 切换"假装用电池"，插着线也能测睡眠
+bool nightSleep = false, forceNight = false;  // forceNight：调试，串口 "Dn" 不管几点都按夜里算
+uint32_t nightNextWin = 0, nightWinEnd = 0;
+const uint32_t NIGHT_WIN_EVERY = 20UL * 60 * 1000, NIGHT_WIN_LEN = 90000;
 
 void wakeUp(uint32_t now) {
   if (!lowPower) return;
   if (deepSleep) {
     audioMicEnable(true);
-    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    motionLowPower(false);
+    ancsLowPower(false);
+    netSlowLoop = false;
+    if (nightSleep) { nightSleep = false; netWifiPause = false; logf("night sleep end\n"); }
+    wifi_mode_t wm;  // WiFi 被夜里关掉时没初始化，别去设它（会报错）；网络任务重开时默认就是省电模式
+    if (esp_wifi_get_mode(&wm) == ESP_OK && wm != WIFI_MODE_NULL) esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     deepSleep = false;
   }
   lowPower = false;
@@ -1241,7 +1825,7 @@ void stepLowPower(uint32_t now) {
 
   // 挂着的字幕只让屏幕亮 30 秒，之后照常睡；叫醒时字幕还在
   bool subBusy = subActive && !(subHold && now - subPageStart > 30000);
-  bool busy = subBusy || focusActive || petting || covered || alarmRinging || callRinging || pttActive || audioSpeaking || (netThinkingSince && now - netThinkingSince < 25000);
+  bool busy = readerOn || buddyAsking || knobMode || subBusy || focusActive || petting || covered || alarmRinging || callRinging || pttActive || audioSpeaking || (netThinkingSince && now - netThinkingSince < 25000);
   if (!lowPower) {
     if (busy || listening || voiceNow || mot.activity > 0.06f) noteActivity(now);
   } else {
@@ -1261,8 +1845,35 @@ void stepLowPower(uint32_t now) {
   if (lowPower && !deepSleep && now - sleptAt > DEEP_AFTER_MS) {
     deepSleep = true;
     audioMicEnable(false);
+    motionLowPower(true);
+    ancsLowPower(true);
+    netSlowLoop = true;
     esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
     logf("deep sleep\n");
+  }
+  // 夜里深睡：关 WiFi，定时开窗
+  bool night = deepSleep && (isNight() || forceNight);
+  if (night && !nightSleep) {
+    nightSleep = true;
+    netWifiPause = true;
+    nightNextWin = now + NIGHT_WIN_EVERY;
+    nightWinEnd = 0;
+    logf("night sleep: wifi off\n");
+  } else if (!night && nightSleep) {
+    nightSleep = false;
+    netWifiPause = false;
+    logf("night sleep end\n");
+  }
+  if (nightSleep) {
+    if (netWifiPause && (int32_t)(now - nightNextWin) >= 0) {
+      netWifiPause = false;
+      nightWinEnd = now + NIGHT_WIN_LEN;
+      logf("night: wifi window\n");
+    } else if (!netWifiPause && nightWinEnd && (int32_t)(now - nightWinEnd) >= 0) {
+      netWifiPause = true;
+      nightWinEnd = 0;
+      nightNextWin = now + NIGHT_WIN_EVERY;
+    }
   }
 }
 uint32_t frames = 0, fpsT = 0;
@@ -1281,6 +1892,8 @@ void loop() {
     pendingTap = false;
     lastTap = now;
     if (alarmRinging) stopRinging(now, false);  // 点一下 = 起来了
+    else if (knobMode) finishKnob(now);  // 调时间时点一下：马上开始
+    else if (readerOn) { readerOn = false; lastInteract = now; }  // 阅读视图：点一下关
     else if (subtitleTap(now)) {}
     else if (focusActive) {
       int left = (int)((focusMs - (now - focusStart) + 59999) / 60000);
@@ -1295,25 +1908,41 @@ void loop() {
   static bool wasDown = false;
   static uint32_t lastDownAt = 0;
   static int badReads = 0;
-  static int16_t downX = 0, downY = 0;
+  static int16_t downX = 0, downY = 0, lastX = 0, lastY = 0;
   static uint32_t downAt = 0;
   if (wasDown && now - lastDownAt > 150) {  // 松手：没摸起来、按得不久，才算"点一下"
     wasDown = false;
     touchIsDown = false;
     if (covered || (coverAt && now - coverAt < 1500)) { petting = false; pendingTap = false; }  // 捂眼睛那一下不算点/摸
-    if (covered || (coverAt && now - coverAt < 1500)) {
+    if (buddyAsking && !covered && !(coverAt && now - coverAt < 1500)) {  // 等批准：长按 1 秒批准，点一下拒绝
+      uint32_t held = lastDownAt - downAt;
+      pendingTap = false;
+      if (held >= 1000) buddyDecide(now, true);
+      else if (held < 600 && !petting) buddyDecide(now, false);
+      petting = false;
+    } else if (covered || (coverAt && now - coverAt < 1500)) {
       // 刚才是捂眼睛，什么都不做
     } else if (!petting && lastDownAt - downAt >= 1500) {  // 长按不动 1.5 秒：开关耳朵
       netEarOn = !netEarOn;
       lastInteract = now;
       sayText(netEarOn ? "耳朵开了。" : "耳朵关了，杂音再多也不理。");
       logf("ear %s\n", netEarOn ? "on" : "off");
+    } else if (!petting && lastDownAt - downAt < 500 && abs(lastX - downX) > 80 && abs(lastX - downX) > 2 * abs(lastY - downY)) {
+      // 快速横划：翻历史消息（左划 = 更早，右划 = 往回）
+      pendingTap = false;
+      lastInteract = now;
+      logf("swipe %s\n", lastX < downX ? "left" : "right");
+      swipeHist(now, lastX < downX);
+    } else if (!petting && readerOn && lastDownAt - downAt < 500 && abs(lastY - downY) > 100 && abs(lastY - downY) > 2 * abs(lastX - downX)) {
+      pendingTap = false;  // 阅读视图里快速上下划：滚动
+      readerScroll(now, lastY < downY ? 3 : -3);
     } else if (!petting && lastDownAt - downAt < 600) {
       lastInteract = now;
-      if (pendingTap && now - pendingTapAt < 400) {  // 双击：开始 / 结束专注
+      if (pendingTap && now - pendingTapAt < 400) {  // 双击：调时间 → 开始专注；专注中双击 = 结束
         pendingTap = false;
         if (focusActive) stopFocus(now, false);
-        else startFocus(now, 25);
+        else if (knobMode) finishKnob(now);  // 调时间时再双击：马上开始
+        else enterKnob(now);
       } else {
         pendingTap = true;  // 先等一下，看是不是双击
         pendingTapAt = now;
@@ -1339,7 +1968,7 @@ void loop() {
       SLOW("touch reset", initTouch());
       badReads = 0;
     }
-    if (down) { lastDownAt = now; touchIsDown = true; noteActivity(now); }
+    if (down) { lastDownAt = now; touchIsDown = true; noteActivity(now); lastTouchAt = now; lastX = x[0]; lastY = y[0]; }
     // 按住并移动超过 40px 且超过 0.4 秒 → 算"摸"
     if (down && wasDown && !petting && !covered && now - downAt > 400 && abs(x[0] - downX) + abs(y[0] - downY) > 40) {
       petting = true;
@@ -1348,7 +1977,7 @@ void loop() {
       logf("pet start\n");
     }
     if (down && !wasDown) {
-      downX = x[0]; downY = y[0]; downAt = now;
+      downX = x[0]; downY = y[0]; downAt = now; touchDownAtG = now;
       logf("tap %d,%d\n", x[0], y[0]);
     }
     if (down) wasDown = true;
@@ -1372,6 +2001,8 @@ void loop() {
         logf("status: bat %d%% %dmV charging=%d usb=%d batt=%d | ear=%d bridge=%d cloud=%d iphone=%d | heap %u psram %u\n",
              ps.percent, ps.mv, ps.charging, ps.usb, ps.battery, netEarOn, netBridgeOnline, netOnline,
              ancsConnected, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
+        logf("buddy: connected=%d total=%d running=%d waiting=%d beat %lus ago msg=%s\n", buddyConnected, buddyTotal, buddyRunning,
+             buddyWaiting, (unsigned long)((millis() - buddyLastBeat) / 1000), buddyMsg);
       } else if (line[0] == 'N') {  // WiFi：N名字|密码 / Ndel:名字 / Nclear（Mac 脚本用）
         strncpy(netWifiCmd, line + 1, sizeof(netWifiCmd) - 1);
         netWifiCmd[sizeof(netWifiCmd) - 1] = 0;
@@ -1386,10 +2017,15 @@ void loop() {
         netTimerCmd = true;
       } else if (line[0] == 'M') {  // 专注：M<分钟> 开始，M0 结束
         netFocusCmd = atoi(line + 1);
+      } else if (line[0] == 'O') {  // 调试：马上抽一次签（不用摇）
+        startDraw(now);
+      } else if (line[0] == 'G') {  // 蓝牙诊断：G? 看状态，G! 重新广播
+        ancsDebug(line[1] == '!');
       } else if (line[0] == 'B') {
         forceBattery = !forceBattery;
         logf("force battery %d\n", forceBattery);
-      } else if (line[0] == 'D') {  // 调试：马上进深睡
+      } else if (line[0] == 'D') {  // 调试：马上进深睡；"Dn" 按夜里算（关 WiFi）
+        forceNight = line[1] == 'n';
         lastActivity = now - SLEEP_AFTER_MS - 1;
         stepLowPower(now);
         sleptAt = now - DEEP_AFTER_MS - 1;
@@ -1417,11 +2053,19 @@ void loop() {
     }
   }
   if (netSayReady) {
+    readerOn = false;
     noteActivity(now);
     lastInteract = now;
     if (expr == SLEEP && autoNight) setExpr(CALM);
-    sayText(netSayBuf, netSayHold);
-    if (netSayChime) msgChimeAt = max((uint32_t)1, now + 500);  // 等半秒：后面跟着语音的话就不响
+    bool songTitle = strncmp(netSayBuf, "正在听：", strlen("正在听：")) == 0;
+    if (!(focusActive && songTitle)) sayText(netSayBuf, netSayHold);  // 专注时换歌不弹歌名
+    if (!songTitle) addHist(netSayBuf);
+    if (netSayChime) {
+      msgChimeAt = max((uint32_t)1, now + 500);  // 等半秒：后面跟着语音的话就不响
+      msgArrivedAt = now;  // 没看再提醒：5 分钟后看一眼
+      msgRemindAt = now + 5UL * 60 * 1000;
+      msgRemindN = 0;
+    }
     netSayChime = false;
     netSayReady = false;
   }
@@ -1432,6 +2076,7 @@ void loop() {
   }
   stepSubtitle(now);
   stepListen(now);
+  stepBeat(now);
   SLOW("imu", motionStep(now));
   stepMotion(now);
   SLOW("battery", stepBattery(now));
@@ -1447,6 +2092,11 @@ void loop() {
   stepPTT(now);
   stepCover(now);
   stepFocus(now);
+  stepKnob(now);
+  stepDraw(now);
+  stepMsgRemind(now);
+  stepBuddy(now);
+  if (readerOn && now - readerAt > 60000) readerOn = false;  // 阅读视图 1 分钟不动自己关
   stepTimers(now);
   stepAlarm(now);
   stepAncs(now);
