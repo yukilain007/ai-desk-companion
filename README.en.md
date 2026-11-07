@@ -181,7 +181,7 @@ Three ways:
 
 - **Battery life**: measured in Oct 2026 with the small Li-ion battery that comes with the board. Unplugged at full charge, screen off and in deep sleep, it drops about 8–10% per hour and **runs out after roughly 6 hours**. The percentage reading is unreliable below about half and can drop suddenly.
   - If you use it as an alarm clock, **keep it plugged in overnight**, otherwise it may die before morning
-  - Night-time savings (WiFi off, gyro off, slower Bluetooth connection interval in deep sleep) are now in; how much longer it lasts is still being measured
+  - Night-time savings (WiFi off, gyro off, slower Bluetooth connection interval in deep sleep) are in, but **they barely help**: measured in Nov 2026, it drops about 9.4% per hour at night (vs. 8–10% before) and still runs out roughly 6 hours after unplugging at full charge. WiFi isn't the main drain; most likely the CPU never really goes to sleep. Still being investigated
 - **Voice bridge is macOS-only**; Windows / Linux need changes (mainly launchd and finding the Mac on the network)
 - **Mandarin-only speech recognition** (whisper set to Chinese); English names are caught by re-recognizing the start of each sentence in English
 - About 70 KB of free heap (Bluetooth takes a lot); keep an eye on it when adding bigger features
