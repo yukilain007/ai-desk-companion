@@ -153,6 +153,15 @@ export class FaceRoom extends DurableObject {
           await this.ctx.storage.delete('pending');
         }
       }
+      // 离线时 Claude 发的表情 / 字幕：连上就补。带编号，板子回 "A<id>" 才删
+      const later = ((await this.ctx.storage.get('later')) || []).filter((x) => Date.now() < x.exp);
+      if (later.length) {
+        try {
+          pair[1].send(`QL${later[later.length - 1].t.toString(36)}`);
+          for (const m of laterMsgs(this.env, later)) pair[1].send(m);
+        } catch {}
+      }
+      await this.ctx.storage.put('later', later);
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
     if (url.pathname === '/audio') {
@@ -171,14 +180,25 @@ export class FaceRoom extends DurableObject {
       return Response.json({ online: alive.length });
     }
     if (url.pathname === '/send') {
-      const { msgs, queueMs } = await request.json();
+      const { msgs, later } = await request.json();
       const alive = this.alive();
+      // 表情 / 字幕：先存一份再发，带编号，板子回 "A<id>" 才删。
+      // 刚关机的头一分钟云端还以为它在线（75 秒才超时）——没有回执，下次连上就会带着时间补发
+      let tag = null;
+      if (later) {
+        const t = Date.now();
+        const list = ((await this.ctx.storage.get('later')) || []).filter((x) => t < x.exp);
+        list.push({ ...later, t, exp: t + 12 * 3600000 });
+        await this.ctx.storage.put('later', list.slice(-5));  // 最多留 5 条、12 小时
+        tag = `QL${t.toString(36)}`;
+      }
       for (const ws of alive) {
         try {
+          if (tag) ws.send(tag);
           for (const m of msgs) ws.send(m);
         } catch {}
       }
-      return Response.json({ online: alive.length });
+      return Response.json({ online: alive.length, queued: !!later && !alive.length });
     }
     if (url.pathname === '/queue') {
       // 定时问候：先存一份再发，带编号 "Q<id>"；板子回 "A<id>" 才算送到。
@@ -239,6 +259,11 @@ export class FaceRoom extends DurableObject {
     if (typeof msg === 'string' && msg.startsWith('A')) {
       const pending = await this.ctx.storage.get('pending');
       if (pending && pending.id === msg.slice(1)) await this.ctx.storage.delete('pending');
+      if (msg[1] === 'L') {  // 补发的表情 / 字幕送到了：删掉这一批（之后新存的留着）
+        const upTo = parseInt(msg.slice(2), 36);
+        const list = (await this.ctx.storage.get('later')) || [];
+        await this.ctx.storage.put('later', list.filter((x) => x.t > upTo));
+      }
       return;
     }
     // 板子开机后报上次重启原因 "R<原因>"：留最近 20 次，用来查卡死/崩溃
@@ -249,9 +274,9 @@ export class FaceRoom extends DurableObject {
       return;
     }
     if (typeof msg === 'string' && msg.startsWith('B')) {
-      const [percent, charging, usb] = msg.slice(1).split(',').map(Number);
+      const [percent, charging, usb, mv] = msg.slice(1).split(',').map(Number);
       const now = Date.now();
-      await this.ctx.storage.put('battery', { percent, charging: !!charging, usb: !!usb, t: now });
+      await this.ctx.storage.put('battery', { percent, charging: !!charging, usb: !!usb, t: now, ...(mv ? { mv } : {}) });
       // 电量历史：每 10 分钟一笔（插拔变化时立刻记），留 7 天，用来算续航
       const hist = (await this.ctx.storage.get('bathist')) || [];
       const last = hist[hist.length - 1];
@@ -286,8 +311,43 @@ function subtitleSafe(text) {
 }
 
 // 续航估算：取最近一段"没插电"的记录，算每小时掉多少电
+// 补发离线时存的表情 / 字幕：字幕前面带上当时的时间、挂着等人看；只有表情没有字时说一句"来看过你"；表情只放最后一个
+function laterMsgs(env, list) {
+  const out = [];
+  const faces = list.filter((x) => x.face !== undefined);
+  if (faces.length) out.push(`F${FACES[faces[faces.length - 1].face]}`);
+  const texts = list.filter((x) => x.text);
+  for (const x of texts) out.push(`H${localHHMM(env, x.t)} ${x.text}`);
+  if (!texts.length) out.push(`H${localHHMM(env, list[list.length - 1].t)} 来看过你，你不在。`);
+  return out;
+}
+
+// 按电压估还能撑多久（分钟）：板子配的小锂电池实测放电曲线，和固件里 batMinutesLeft 同一张表
+const BAT_CURVE = [[4090, 358], [4020, 327], [4007, 285], [3958, 265], [3921, 245], [3883, 225], [3853, 204], [3833, 173], [3788, 131], [3741, 111],
+  [3722, 100], [3667, 83], [3627, 73], [3572, 63], [3531, 52], [3510, 42], [3471, 32], [3450, 21], [3388, 11], [3224, 0]];
+function minutesLeftByVoltage(mv) {
+  if (mv >= BAT_CURVE[0][0]) return BAT_CURVE[0][1];
+  for (let i = 1; i < BAT_CURVE.length; i++) {
+    const [v, m] = BAT_CURVE[i], [v0, m0] = BAT_CURVE[i - 1];
+    if (mv >= v) return Math.round(m + ((mv - v) * (m0 - m)) / (v0 - v));
+  }
+  return 0;
+}
+
+// 补发离线时存的表情 / 字幕：字幕前面带上当时的时间、挂着等她看；只有表情没有字时说一句"来看过你"；表情只放最后一个
+function laterMsgs(list) {
+  const out = [];
+  const faces = list.filter((x) => x.face !== undefined);
+  if (faces.length) out.push(faceMsg(faces[faces.length - 1].face));
+  const texts = list.filter((x) => x.text);
+  for (const x of texts) out.push(`H${beijingHHMM(x.t)} ${x.text}`);
+  if (!texts.length) out.push(`H${beijingHHMM(list[list.length - 1].t)} 来看过你，你不在。`);
+  return out;
+}
+
 function batteryEstimate(hist, bat) {
   if (!bat || bat.usb) return null;
+  if (bat.mv) return { minutesLeft: minutesLeftByVoltage(bat.mv) };  // 百分比斜率在满电段会骗人，有电压就按电压
   let i = hist.length - 1;
   while (i > 0 && !hist[i - 1].u) i--;  // 往回找到这次拔电的起点
   const seg = hist.slice(i).filter((h) => !h.u);
@@ -441,7 +501,8 @@ async function handleRpc(msg, env) {
         if (st.focusToday && st.focusToday.count) parts.push(`Focus today: ${st.focusToday.count} session(s), ${st.focusToday.minutes} min.`);
         else parts.push('No focus sessions completed today.');
         const e = st.estimate;
-        if (e) parts.push(`On battery for ${e.sinceUnplugH} h, dropping ~${e.perHour}%/h — about ${e.hoursLeft} h left.`);
+        if (e && e.minutesLeft !== undefined) parts.push(`On battery: roughly ${e.minutesLeft >= 90 ? Math.round(e.minutesLeft / 60) + ' h' : e.minutesLeft + ' min'} left (estimated from voltage; the percentage is unreliable, a full charge lasts about 6 h).`);
+        else if (e) parts.push(`On battery for ${e.sinceUnplugH} h, dropping ~${e.perHour}%/h — about ${e.hoursLeft} h left.`);
         return ok({ content: [{ type: 'text', text: parts.join(' ') }] });
       }
       const face = args.face;
@@ -502,10 +563,16 @@ async function handleRpc(msg, env) {
       } else {
         return ok({ content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true });
       }
-      const r = await room(env).fetch('https://room/send', { method: 'POST', body: JSON.stringify({ msgs }) });
-      const { online } = await r.json();
+      // 短表情和字幕：板子不在线就存起来，连上再补（会一直挂着的表情不存，免得过时了还生效）
+      let later;
+      const keepFace = face !== undefined && ['wink', 'curious', 'meh', 'smile'].includes(face);
+      if (name === 'set_face' && keepFace) later = { face };
+      else if (name === 'show_subtitle' || name === 'say') later = { text: msgs[msgs.length - 1].slice(1), ...(keepFace ? { face } : {}) };
+      const r = await room(env).fetch('https://room/send', { method: 'POST', body: JSON.stringify({ msgs, later }) });
+      const { online, queued } = await r.json();
+      if (queued) return ok({ content: [{ type: 'text', text: 'Display is offline right now — saved. It will show when the display next comes online (kept for 12 h, shown with the time you sent it).' }] });
       const what = name === 'set_alarm' ? (args.cancel_all ? 'All alarms cancelled' : `Alarm set: ${args.time} (${args.repeat || 'once'})`) : name === 'set_timer' ? (args.cancel_all ? 'All timers cancelled' : `Timer set: ${args.minutes} min${args.label ? ` (${args.label})` : ''}`) : name === 'set_face' ? `Face set: ${face}` : name === 'start_focus' ? (args.stop ? 'Focus session stopped' : `Focus session started (${parseInt(args.minutes) || 25} min)`) : 'Subtitle shown on the display';
-      const text = online ? what : 'Display is offline (not connected to WiFi right now) — nothing shown.';
+      const text = online ? what + (later ? ' (if it turns out the display had just gone offline, this is saved and will show when it reconnects).' : '') : 'Display is offline (not connected to WiFi right now) — nothing shown.';
       return ok({ content: [{ type: 'text', text }], isError: !online });
     }
     default:

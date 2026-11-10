@@ -28,10 +28,13 @@ A palm-sized round screen with a living face. Keep it on your desk at home, take
 - Timers (up to 4) and alarms (up to 3, stored on the board, survive power loss)
 - Reminds you to go to bed, and nags again if you're still up late
 - On battery: screen off (light sleep) after 20 s of inactivity, deep sleep (mic and gyro off) after 5 min; at night deep sleep also turns WiFi off, waking it for 90 s every 20 min to fetch messages
-- If an alarm is set for the morning but it isn't plugged in, it tells you: when you unplug it, when the battery drops below 30%, and at bedtime
+- If an alarm is set for the morning but it isn't plugged in, it tells you: when you unplug it, when it has less than about an hour and a half left, and at bedtime
 
 **When online**
 - Claude on claude.ai (web / mobile app) can use it: change expressions, show subtitles, speak, start focus, set alarms, check battery
+  - Short expressions and subtitles sent while it's offline are kept in the cloud (up to 5, for 12 hours) and shown, with the time they were sent, when it next connects
+- Low-battery warnings are given as time left (once at about an hour, once at about twenty minutes), not as a percentage: the percentage is estimated from voltage and drops fast in the second half
+- After booting and getting online it says one line: a greeting, plus roughly how long the battery will last if it isn't plugged in
 - Daily greetings at set times (the morning one includes the weather)
 - iPhone calls and WeChat messages show up on screen (only who it's from, never the content)
 - Set up WiFi from your phone over Bluetooth

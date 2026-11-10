@@ -19,6 +19,7 @@ volatile bool netClipIncoming = false;
 static bool fromBridge = false;  // 当前这条消息来自 Mac 对话桥
 volatile int netBatPercent = -1;
 volatile bool netBatCharging = false, netBatUsb = false;
+volatile int netBatMv = 0;
 volatile bool netBridgeOnline = false;
 volatile bool netEarOn = true;
 volatile uint32_t netThinkingSince = 0;
@@ -432,10 +433,10 @@ static void netTask(void *) {
         ws.sendTXT(r);
         resetReported = true;
       }
-      // 每分钟（以及刚连上时）报一次电量："B<百分比>,<充电中>,<插着USB>"
+      // 每分钟（以及刚连上时）报一次电量："B<百分比>,<充电中>,<插着USB>,<电压mV>"
       if (netOnline && netBatPercent >= 0 && (lastBat == 0 || now - lastBat > 60000)) {
-        char b[24];
-        snprintf(b, sizeof(b), "B%d,%d,%d", netBatPercent, netBatCharging ? 1 : 0, netBatUsb ? 1 : 0);
+        char b[32];
+        snprintf(b, sizeof(b), "B%d,%d,%d,%d", netBatPercent, netBatCharging ? 1 : 0, netBatUsb ? 1 : 0, netBatMv);
         ws.sendTXT(b);
         lastBat = now;
       }

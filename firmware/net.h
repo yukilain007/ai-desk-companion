@@ -15,6 +15,7 @@ extern volatile bool netClipIncoming;    // 正在收一段语音（收完会播
 extern volatile bool netSayHold;        // 这句要挂着（点一下或 10 分钟才收）
 extern volatile int netBatPercent;      // 主循环填，网络任务每分钟报给云端
 extern volatile bool netBatCharging, netBatUsb;
+extern volatile int netBatMv;           // 电池电压（mV），云端用它估还能撑多久
 
 extern volatile bool netBridgeOnline;   // 连着 Mac 上的对话桥（局域网）
 extern volatile bool netEarOn;

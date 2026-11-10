@@ -672,6 +672,25 @@ void chargeReact(uint32_t now) {
   logf("plugged in (%d%%)\n", bat.percent);
 }
 
+// 还能撑多久（分钟）：按实测的放电曲线查表（板子配的小锂电池，满电到没电约 6 小时；换了电池要重测）。
+// 电量百分比是按电压估的，满电段掉得慢、后半段掉得飞快（52% 到 0 只有 100 分钟），所以提醒改按这个报
+int batLeftMin = -1;  // -1：不知道 / 插着电
+int batMinutesLeft(int mv) {
+  static const int16_t T[][2] = { {4090, 358}, {4020, 327}, {4007, 285}, {3958, 265}, {3921, 245}, {3883, 225}, {3853, 204}, {3833, 173}, {3788, 131}, {3741, 111},
+                                  {3722, 100}, {3667, 83}, {3627, 73}, {3572, 63}, {3531, 52}, {3510, 42}, {3471, 32}, {3450, 21}, {3388, 11}, {3224, 0} };
+  const int N = sizeof(T) / sizeof(T[0]);
+  if (mv >= T[0][0]) return T[0][1];
+  for (int i = 1; i < N; i++)
+    if (mv >= T[i][0]) return T[i][1] + (int)((long)(mv - T[i][0]) * (T[i - 1][1] - T[i][1]) / (T[i - 1][0] - T[i][0]));
+  return 0;
+}
+String batLeftText(int m) {
+  if (m >= 90) return "大概还能撑 " + String((m + 30) / 60) + " 小时";
+  if (m >= 45) return "大概还能撑一小时";
+  if (m >= 20) return "大概还能撑半小时";
+  return "快没电了";
+}
+
 void stepBattery(uint32_t now) {
   static uint32_t lastRead = 0;
   static bool warned20 = false, warned10 = false;
@@ -682,6 +701,7 @@ void stepBattery(uint32_t now) {
   netBatPercent = bat.percent;
   netBatCharging = bat.charging;
   netBatUsb = bat.usb;
+  netBatMv = bat.mv;
   if (!bat.battery || bat.percent < 0) return;
   // 夜里有闹钟要响却没插电：拔线时马上提醒；电低于 30% 再急一点（电池撑不了一整夜，半夜没电关机早上就叫不了）
   static bool lastUsb = true, warnedNight = false, firstRead = true;
@@ -690,7 +710,13 @@ void stepBattery(uint32_t now) {
   bool justPlugged = !lastUsb && bat.usb;
   lastUsb = bat.usb;
   if (justPlugged) chargeReact(now);
-  if (bat.usb) { warned20 = warned10 = warnedNight = false; return; }
+  static float mvAvg = 0;  // 电压平滑一下：放声音、亮屏时会瞬间掉一截
+  static int mvN = 0;
+  if (bat.usb) { warned20 = warned10 = warnedNight = false; mvAvg = 0; mvN = 0; batLeftMin = -1; return; }
+  mvAvg = mvN ? mvAvg * 0.8f + bat.mv * 0.2f : bat.mv;
+  if (mvN < 100) mvN++;
+  batLeftMin = batMinutesLeft((int)mvAvg);
+  bool estOk = mvN >= 5;  // 刚拔电 / 刚开机头几笔不算
   int h = localHour();
   bool evening = timeKnown && (h >= 21 || h < 6);
   String when;
@@ -700,31 +726,32 @@ void stepBattery(uint32_t now) {
       sayText(("拔电了？明早 " + when + " 还要叫你，插着吧。").c_str(), true);
       playChime(1318, 1760, 0.5f, 0.3f);
       logf("unplugged with alarm %s\n", when.c_str());
-    } else if (bat.percent <= 30 && !warnedNight) {
+    } else if (estOk && batLeftMin <= 90 && !warnedNight) {
       warnedNight = true;
       setExpr(CURIOUS, 5);
-      sayText(("电只剩 " + String(bat.percent) + "%，撑不到明早 " + when + " 叫你。快插电。").c_str(), true);
+      sayText((batLeftText(batLeftMin) + "，撑不到明早 " + when + " 叫你。快插电。").c_str(), true);
       playChime(988, 740, 0.8f, 0.4f);
       logf("low battery before alarm\n");
     }
   }
-  if (bat.percent <= 10 && !warned10) {
+  if (!estOk) return;
+  if (batLeftMin <= 25 && !warned10) {  // 按还能撑多久提醒：百分比在后半段掉得飞快，"还剩 20%"时其实只剩二十来分钟
     warned10 = warned20 = true;
     setExpr(CURIOUS, 4);
-    sayText("只剩10%了。再不充电，我就要睡着了。");
-  } else if (bat.percent <= 20 && !warned20) {
+    sayText("大概只剩二十分钟了。再不充电，我就要睡着了。");
+  } else if (batLeftMin <= 60 && !warned20) {
     warned20 = true;
-    sayText("电量还剩20%，找个时间给我充一下。");
+    sayText("电不多了，大概还能撑一小时。找个时间给我充一下。");
   }
 }
 
 void drawBattery() {
-  if (!bat.battery || bat.usb || bat.percent < 0 || bat.percent >= 15) return;
+  if (!bat.battery || bat.usb || batLeftMin < 0 || batLeftMin > 60) return;  // 剩不到一小时才画
   int x = 233 - 12 - OX, y = 398 - OY;
   uint16_t c = accentDim(0.6f);
   gfx->drawRoundRect(x, y, 22, 11, 2, c);
   gfx->fillRect(x + 22, y + 3, 2, 5, c);
-  gfx->fillRect(x + 2, y + 2, max(1, 18 * bat.percent / 100), 7, c);
+  gfx->fillRect(x + 2, y + 2, max(1, 18 * batLeftMin / 180), 7, c);
 }
 
 // ---------- bedtime ----------
@@ -1216,6 +1243,7 @@ uint32_t knobLastMove = 0;
 float knobAngle = 0;
 
 void enterKnob(uint32_t now) {
+  if (readerOn || alarmRinging || buddyAsking) return;  // 一次只做一件事：别的界面开着时不进专注
   knobMode = true;
   knobAngle = 0;
   knobMin = 25;
@@ -1597,6 +1625,27 @@ String clip(const char *s, int maxW) {  // 按字幕宽度截断（汉字 32、�
   return out;
 }
 
+// 开机第一句：打招呼；没插电时报一下还能撑多久。
+// 云端存着的留言（定时问候、离线时发来的字幕）连上就会补发，等它们显示完再说，不抢
+extern bool lowPower;
+void stepBootHello(uint32_t now) {
+  static bool done = false;
+  if (done) return;
+  if (now > 180000) { done = true; return; }  // 3 分钟还没轮到：算了
+  if (!timeKnown || now < 8000) return;
+  static uint32_t onlineAt = 0;
+  if (netOnline && !onlineAt) onlineAt = now;
+  if (!(onlineAt && now - onlineAt > 5000) && now < 45000) return;  // 等云端补发留言；45 秒还没网就不等了
+  if (subActive || lowPower || focusActive || alarmRinging || readerOn) return;
+  done = true;
+  int h = localHour();
+  String t = (h >= 23 || h < 5) ? "还没睡？" : h < 11 ? "早。" : "来了。";
+  if (bat.battery && !bat.usb && batLeftMin > 0) t += "电" + batLeftText(batLeftMin) + "。";
+  noteActivity(now);
+  sayText(t.c_str());
+  logf("boot hello: %s\n", t.c_str());
+}
+
 void stepBuddy(uint32_t now) {
   if (buddyPasskeySeq != buddyPkSeen) {
     buddyPkSeen = buddyPasskeySeq;
@@ -1942,6 +1991,7 @@ void loop() {
         pendingTap = false;
         if (focusActive) stopFocus(now, false);
         else if (knobMode) finishKnob(now);  // 调时间时再双击：马上开始
+        else if (readerOn) readerOn = false;  // 阅读视图里双击：只是关掉
         else enterKnob(now);
       } else {
         pendingTap = true;  // 先等一下，看是不是双击
@@ -2096,6 +2146,7 @@ void loop() {
   stepDraw(now);
   stepMsgRemind(now);
   stepBuddy(now);
+  stepBootHello(now);
   if (readerOn && now - readerAt > 60000) readerOn = false;  // 阅读视图 1 分钟不动自己关
   stepTimers(now);
   stepAlarm(now);
